@@ -28,8 +28,8 @@ OPENMPI_MODULE="${OPENMPI_MODULE:-openmpi/5.0.8}"
 
 # ── Python / conda environment (analysis + plotting) ──────────────────────────
 # The post-analysis tools (matplotlib, mdanalysis, numpy, …) run in a conda env
-# created from installation_scripts/environment.yml. Create it once with
-# installation_scripts/install_python_env.sh.
+# created from scripts/installation/environment.yml. Create it once with
+# scripts/installation/install_python_env.sh.
 #
 # CONDA_MODULE — module that provides conda/mamba (miniforge on this cluster).
 # GROMD_ENV    — name of the conda env (matches `name:` in environment.yml).

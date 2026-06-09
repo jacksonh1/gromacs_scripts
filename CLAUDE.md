@@ -25,12 +25,12 @@ flexibility).
 
 **Entry point:** copy `example/submit_jobs/submit_REMD.sh` (T-REMD) or
 `example/submit_jobs/submit_MD.sh` (plain MD), set parameters, run it. The submit script
-submits the matching engine (`gromacs_scripts/REMD-gromacs.sbatch` /
+submits the matching engine (`scripts/simulation/REMD-gromacs.sbatch` /
 `MD-gromacs.sbatch`) to SLURM with parameters exported as environment variables.
 
 **Configuration:** `site_config.sh` in the repo root — cluster-specific settings (GROMACS path, scratch root, module names). Edit once per cluster; all scripts source it automatically.
 
-**Post-analysis:** automatically run at the end of each job (STEP 12 of the sbatch). Scripts live in `analysis_scripts/`; see `analysis_scripts/README.md` for usage. Reference for GROMACS T-REMD log format and parsing: `analysis_scripts/REMD_log_reference.md`.
+**Post-analysis:** automatically run at the end of each job (STEP 12 of the sbatch). Scripts live in `scripts/analysis/`; see `scripts/analysis/README.md` for usage. Reference for GROMACS T-REMD log format and parsing: `scripts/analysis/REMD_log_reference.md`.
 
 **Example job:** `example/outputs/output_T-REMD/helix_fusion-2ns-REMD-300-400K-48reps-NVT-exf-1ps/` — use this to test analysis scripts without rerunning a simulation.
 
@@ -110,7 +110,7 @@ SLURM copies the `.sbatch` script to a temporary location before running it, so 
 - Use `$SLURM_SUBMIT_DIR` — a SLURM-provided environment variable that always holds the directory from which `sbatch` was called. Works as long as the job is submitted from the repo root (the normal case).
 - Or pass the repo path explicitly via `--export` (e.g. `GROMACS_SCRIPTS_DIR`) and use that variable inside the sbatch.
 
-Regular shell scripts called from *outside* SLURM (e.g. `analysis_scripts/`) can use `BASH_SOURCE[0]` reliably.
+Regular shell scripts called from *outside* SLURM (e.g. `scripts/analysis/`) can use `BASH_SOURCE[0]` reliably.
 
 ### GROMACS: `-pbc nojump` breaks T-REMD trajectories
 
@@ -164,7 +164,7 @@ For a multi-chain complex, `-pbc mol` wraps each chain's COM into the box *indep
 
 The `Replica exchange statistics` block at the end of each replica log contains pre-computed per-pair acceptance rates, exchange counts, and mean Metropolis probabilities. Reparsing the thousands of per-frame `Repl ex` lines to recount exchanges is unnecessary.
 
-**Fix:** parse the statistics block at the end of the log. See `analysis_scripts/REMD_log_reference.md` for the format and parsing code.
+**Fix:** parse the statistics block at the end of the log. See `scripts/analysis/REMD_log_reference.md` for the format and parsing code.
 
 ### GROMACS: the Empirical Transition Matrix is not dwell time
 
@@ -178,11 +178,21 @@ The install (`$HOME/opt/gromacs/2024.3-plumed/bin/`) ships a single binary, `gmx
 
 ### GROMACS: conformational clustering uses sklearn (`cluster_traj.py`), not `gmx cluster`
 
-`gmx cluster` (gromos) builds the full pairwise-RMSD matrix → **O(N²)** in time and memory, which is impractical for the long production runs (25k+ frames). Conformational clustering is therefore done in `analysis_scripts/cluster_traj.py` (MDAnalysis + scikit-learn DBSCAN/k-means on flattened Cα coordinates), which scales: a 25k-frame run clusters in ~13 s. It runs in the **shared** part of `run_analysis.sh` (consumes `<prefix>_stripped_aligned.{xtc,gro}`), so it serves single- and multi-chain alike — no `multichain_*` variant.
+`gmx cluster` (gromos) builds the full pairwise-RMSD matrix → **O(N²)** in time and memory, which is impractical for the long production runs (25k+ frames). Conformational clustering is therefore done in `scripts/analysis/cluster_traj.py` (MDAnalysis + scikit-learn DBSCAN/k-means on flattened Cα coordinates), which scales: a 25k-frame run clusters in ~13 s. It runs in the **shared** part of `run_analysis.sh` (consumes `<prefix>_stripped_aligned.{xtc,gro}`), so it serves single- and multi-chain alike — no `multichain_*` variant.
 
 Things to keep straight:
 - **`--cutoff` is a real RMSD cutoff (nm)** only because the input frames are pre-aligned to one common reference, so flattened-coord Euclidean distance = `√N_atoms × RMSD`. The script sets DBSCAN `eps = cutoff_Å × √N_selected`. **If you ever feed `cluster_traj.py` an un-aligned trajectory, the cutoff stops meaning RMSD.** (This was a latent bug in the Amber `cluster_MD.py`, where `eps` was a raw flattened distance mislabelled "Å".)
 - **Cluster count vs noise is controlled by `min_samples`** (the DBSCAN density knob), **not** a post-hoc population filter — the user rejected adding one. The default is **adaptive: `max(10, 1.5% of frames)`**, so a region must hold ~1.5% of the trajectory to be a state and the long tail of tiny clusters falls into noise (without it, a flexible system gave 80 clusters). Raise `--min-samples` for fewer; pass an absolute int to override. Tuned on the WW-domain REMD slots to keep even the most heterogeneous case to ≲10 clusters.
 - **Outputs go in a `clustering/` subdir** next to the prefix (`analysis/clustering/<prefix>_cluster_*`), not flat in `analysis/`.
 - **`-pbc cluster`** (the multi-chain periodic-image fix) is **unrelated** to this conformational clustering — different operation, despite the shared word. The multichain PBC scripts are deliberately not named `*cluster*`.
+
+### Per-job parameters are validated at STEP 1 (fail loud, not silent default)
+
+Both engines call `scripts/simulation/validate_params.py` (`--engine remd|md`) in STEP 1: once with `--check-keys "$1"` *before* sourcing a config file (rejects typo'd keys against an allowlist), then once on the resolved values (required `PDB_IN`, type, range — covers both config-file and `--export` params). A bad parameter now exits with `[ERROR] …` instead of silently using a `${VAR:-default}`. `PDB_IN` is **required** (no default).
+
+Things to keep straight when touching parameters:
+- **Three lists must stay in sync** when you add/rename a param: the `${VAR:-default}` read in the engine's STEP 1, the `export …` list right before the `python3 "$VALIDATE_PARAMS"` call (so the validator can read it from the environment), and the allowlist + rules in `validate_params.py`. A param missing from the export list is silently unvalidated; one missing from the allowlist is falsely rejected as a typo.
+- **`validate_params.py` is stdlib-only** — it runs under the sbatch's *system* `python3` at STEP 1, before the analysis conda env is activated. Don't add non-stdlib imports.
+- **Derived step counts** (`*_NSTEPS`, `TAU_T`, `REPLEX_STEPS`) are computed **after** the validator on purpose, so a non-numeric input fails with a clear message instead of a raw traceback from the inline `python3 -c`. Keep new derivations below the validate call.
+- **Typo'd-key detection is config-file only.** Under `--export=ALL` the job inherits the whole shell environment, so there's no clean manifest to flag an unknown `--export` key against — only value/required/range checks cover that path (by design).
 

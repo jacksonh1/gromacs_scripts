@@ -47,5 +47,4 @@ REPLEX_PS="0.5"                       # exchange attempt interval (ps)
 # PRESERVE_FROM_STEP=9                # preserve scratch on failure from this step
 
 # ── GROMACS binary ───────────────────────────────────────────────────────────
-# GMX="gmx"                           # or "gmx_mpi" depending on your build
-# MDRUN="gmx mdrun"                   # the mdrun command (script appends _mpi)
+# GMX="gmx_mpi"                       # this build provides gmx_mpi only; leave unset

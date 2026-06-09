@@ -45,7 +45,7 @@ export GMX_MAXBACKUP=-1
 
 # Activate the analysis/plotting Python env (matplotlib; needed by the plotters
 # and remd_acceptance.py). The per-metric calc scripts source GROMACS themselves.
-SITE_CONFIG="${SCRIPT_DIR}/../site_config.sh"
+SITE_CONFIG="${SCRIPT_DIR}/../../site_config.sh"
 if [[ -f "$SITE_CONFIG" ]]; then
   source "$SITE_CONFIG"
   if declare -f activate_python_env >/dev/null; then activate_python_env; fi

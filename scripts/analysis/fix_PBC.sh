@@ -41,7 +41,7 @@ OUT_XTC="${3:?Usage: bash fix_PBC.sh TPR XTC OUT_PBC_XTC}"
 # Unlike sbatch scripts (which SLURM copies to a temp path), regular scripts
 # can reliably use BASH_SOURCE[0] to find their own location.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SITE_CONFIG="${SCRIPT_DIR}/../site_config.sh"
+SITE_CONFIG="${SCRIPT_DIR}/../../site_config.sh"
 if [[ -f "$SITE_CONFIG" ]]; then
   source "$SITE_CONFIG"
   set +u; source "$GMXRC"; set -u
@@ -52,7 +52,7 @@ if command -v gmx_mpi &>/dev/null; then
 elif command -v gmx &>/dev/null; then
   GMX="gmx"
 else
-  echo "[ERROR] No GROMACS binary found. Source your GMXRC or set GROMACS_SCRIPTS_DIR."
+  echo "[ERROR] No GROMACS binary (gmx_mpi/gmx) on PATH. Source your GROMACS GMXRC or load the GROMACS module first."
   exit 1
 fi
 

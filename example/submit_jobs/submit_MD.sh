@@ -2,7 +2,7 @@
 # Submit a plain production MD job. Copy this file, set your parameters, and run it.
 # Usage: bash submit_MD.sh
 
-export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/gromacs_scripts"
+export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/scripts/simulation"
 
 # === Temperature & production ===
 T_SIM=300        # single production temperature (K)

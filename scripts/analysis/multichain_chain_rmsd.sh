@@ -27,11 +27,11 @@ GROUP="${4:?Usage: bash multichain_chain_rmsd.sh STRUCT TRAJ NDX GROUP OUT}"
 OUT="${5:?Usage: bash multichain_chain_rmsd.sh STRUCT TRAJ NDX GROUP OUT}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SITE_CONFIG="${SCRIPT_DIR}/../site_config.sh"
+SITE_CONFIG="${SCRIPT_DIR}/../../site_config.sh"
 if [[ -f "$SITE_CONFIG" ]]; then source "$SITE_CONFIG"; set +u; source "$GMXRC"; set -u; fi
 if command -v gmx_mpi &>/dev/null; then GMX="gmx_mpi"
 elif command -v gmx &>/dev/null; then GMX="gmx"
-else echo "[ERROR] No GROMACS binary found."; exit 1; fi
+else echo "[ERROR] No GROMACS binary (gmx_mpi/gmx) on PATH. Source your GROMACS GMXRC or load the GROMACS module first."; exit 1; fi
 
 [[ -f "$STRUCT" ]] || { echo "[ERROR] Structure not found: $STRUCT"; exit 1; }
 [[ -f "$TRAJ" ]]   || { echo "[ERROR] Trajectory not found: $TRAJ"; exit 1; }

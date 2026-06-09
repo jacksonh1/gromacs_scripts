@@ -2,7 +2,7 @@
 # Submit a T-REMD job. Copy this file, set your parameters, and run it.
 # Usage: bash submit_REMD.sh
 
-export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/gromacs_scripts"
+export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/scripts/simulation"
 
 # === Replicas & temperatures ===
 REPLICAS=48

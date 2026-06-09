@@ -24,8 +24,8 @@ Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for *
 
 ## Prerequisites
 
-- GROMACS 2024.3 compiled with MPI + CUDA (see `installation_scripts/`)
-- A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `installation_scripts/environment.yml` — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
+- GROMACS 2024.3 compiled with MPI + CUDA (see `scripts/installation/`)
+- A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `scripts/installation/environment.yml` — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
 - SLURM with GPU access
 
 A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identically to a plain build and additionally enables the REST2 pipeline (`dev/`). A plain build works for T-REMD only.
@@ -42,9 +42,9 @@ A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identic
 
 2. **Create the analysis conda env** (once per cluster, on a login node):
    ```bash
-   bash installation_scripts/install_python_env.sh
+   bash scripts/installation/install_python_env.sh
    ```
-   This builds `groMD_env` from `installation_scripts/environment.yml`. The
+   This builds `groMD_env` from `scripts/installation/environment.yml`. The
    pipeline activates it automatically for the post-analysis steps.
 
 3. That's it. The pipeline scripts source `site_config.sh` automatically.
@@ -66,11 +66,15 @@ A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identic
 
 All job parameters live in the submit script — no separate config file needed.
 
+Parameters are validated at job start: a missing `PDB_IN`, an out-of-range or
+non-numeric value, or (in a config file) a misspelled key fails the job immediately with
+a clear `[ERROR]` message instead of silently falling back to a default.
+
 ---
 
 ## Pipeline Overview
 
-The engine script (`gromacs_scripts/REMD-gromacs.sbatch`) runs 13 steps:
+The engine script (`scripts/simulation/REMD-gromacs.sbatch`) runs 13 steps:
 
 | Step | Description |
 |------|-------------|
@@ -86,9 +90,9 @@ The engine script (`gromacs_scripts/REMD-gromacs.sbatch`) runs 13 steps:
 | 9 | Run T-REMD production |
 | 10 | Finalize outputs, create trajectory symlinks |
 | 11 | Write parameters log |
-| 12 | Post-analysis: acceptance rates + PBC fix + strip/align (rep000) |
+| 12 | Post-analysis: acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
 
-See `gromacs_scripts/REMD-output-guide.md` for a full description of all output files.
+See `scripts/simulation/REMD-output-guide.md` for a full description of all output files.
 
 ---
 
@@ -103,10 +107,10 @@ Large trajectory files (`.xtc`) are written to `SCRATCH_ROOT` and symlinked into
 
 Post-analysis runs automatically at the end of each job. To re-run manually:
 ```bash
-python analysis_scripts/remd_acceptance.py    OUTDIR        # acceptance rates (target 20–30%)
-bash   analysis_scripts/fix_PBC_strip_align.sh OUTDIR 000   # PBC fix + strip + align
+python scripts/analysis/remd_acceptance.py    OUTDIR        # acceptance rates (target 20–30%)
+bash   scripts/analysis/fix_PBC_strip_align.sh OUTDIR 000   # PBC fix + strip + align
 ```
-See `analysis_scripts/README.md` for the full script reference.
+See `scripts/analysis/README.md` for the full script reference.
 
 ---
 
@@ -125,13 +129,15 @@ See `analysis_scripts/README.md` for the full script reference.
 ```
 gromacs_REMD/
 ├── site_config.sh              # Cluster-level settings (edit once)
-├── gromacs_scripts/
-│   ├── REMD-gromacs.sbatch    # T-REMD engine (do not edit)
-│   ├── config_example.sh      # Job config template (copy and edit)
-│   └── REMD-output-guide.md   # Full output file reference
-├── analysis_scripts/           # Post-processing tools (see analysis_scripts/README.md)
+├── scripts/
+│   ├── simulation/             # Simulation engines (do not edit)
+│   │   ├── REMD-gromacs.sbatch    # T-REMD engine
+│   │   ├── MD-gromacs.sbatch      # Plain-MD engine
+│   │   ├── config_example.sh      # Job config template (copy and edit)
+│   │   └── REMD-output-guide.md   # Full output file reference
+│   ├── analysis/               # Post-processing tools (see scripts/analysis/README.md)
+│   └── installation/           # GROMACS + PLUMED build scripts
 ├── dev/                        # REST2 pipeline (in development)
-├── installation_scripts/       # GROMACS + PLUMED build scripts
 └── example/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/

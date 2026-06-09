@@ -150,7 +150,7 @@ Symlinks pointing to the actual trajectory files on scratch (`SCRATCH_DIR`):
 
 ### `analysis/` — Post-analysis (Step 10)
 
-Produced by the shared `analysis_scripts/` tools (see `analysis_scripts/README.md`):
+Produced by the shared `scripts/analysis/` tools (see `scripts/analysis/README.md`):
 
 | File | Description |
 |------|-------------|
@@ -177,7 +177,7 @@ produces the **same files as above** on the whole complex, **plus**:
 | `md_interchain_mindist.xvg` / `.png` | minimum-image distance between chains (binding check) |
 | `md_chains.ndx` | per-chain index groups used for the above |
 
-See `analysis_scripts/README.md` → "Multi-chain complexes".
+See `scripts/analysis/README.md` → "Multi-chain complexes".
 
 ### `parameters.txt`
 
@@ -195,5 +195,5 @@ timestep, production length, NPT convergence segments, etc.) and the scratch pat
 | Analyze the ensemble | `analysis/md_stripped_aligned.xtc` (protein-only, aligned) + `analysis/md_stripped_aligned.gro` |
 | RMSD / Rg / RMSF / DSSP | `analysis/md_{rmsd,rg,rmsf,dssp}.*` |
 | Conformational states | `analysis/clustering/md_cluster_summary.txt` + `md_cluster_rep_c*.pdb` (representative structures) |
-| Re-run post-processing | `bash analysis_scripts/run_analysis.sh OUTDIR` (regenerates the whole `analysis/` dir; no resubmission) |
-| Inspect with solvent | `bash analysis_scripts/fix_PBC.sh prod/md.tpr trajectories/md.xtc analysis/md_pbc.xtc` |
+| Re-run post-processing | `bash scripts/analysis/run_analysis.sh OUTDIR` (regenerates the whole `analysis/` dir; no resubmission) |
+| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/md.tpr trajectories/md.xtc analysis/md_pbc.xtc` |

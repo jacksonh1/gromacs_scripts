@@ -5,7 +5,7 @@
 # Creates the conda env (groMD_env by default) from environment.yml. Run this
 # once per cluster, on a login node — no GPU or SLURM job needed:
 #
-#   bash installation_scripts/install_python_env.sh
+#   bash scripts/installation/install_python_env.sh
 #
 # The env name and conda module come from site_config.sh (GROMD_ENV, CONDA_MODULE),
 # so this stays in sync with what the pipeline activates at run time.
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../site_config.sh"
+source "${SCRIPT_DIR}/../../site_config.sh"
 
 ENV_YML="${SCRIPT_DIR}/environment.yml"
 [[ -f "$ENV_YML" ]] || { echo "[ERROR] environment.yml not found: $ENV_YML"; exit 1; }

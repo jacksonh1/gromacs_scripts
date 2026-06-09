@@ -37,7 +37,7 @@ OUT_XTC="${3:?Usage: bash multichain_fix_PBC.sh TPR XTC OUT_PBC_XTC}"
 
 # ── Locate GROMACS ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SITE_CONFIG="${SCRIPT_DIR}/../site_config.sh"
+SITE_CONFIG="${SCRIPT_DIR}/../../site_config.sh"
 if [[ -f "$SITE_CONFIG" ]]; then
   source "$SITE_CONFIG"
   set +u; source "$GMXRC"; set -u
@@ -45,7 +45,7 @@ fi
 
 if command -v gmx_mpi &>/dev/null; then GMX="gmx_mpi"
 elif command -v gmx &>/dev/null; then GMX="gmx"
-else echo "[ERROR] No GROMACS binary found. Source your GMXRC or set GROMACS_SCRIPTS_DIR."; exit 1
+else echo "[ERROR] No GROMACS binary (gmx_mpi/gmx) on PATH. Source your GROMACS GMXRC or load the GROMACS module first."; exit 1
 fi
 
 # ── Validate inputs ───────────────────────────────────────────────────────────
