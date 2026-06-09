@@ -1,5 +1,11 @@
 # GROMACS T-REMD Output Guide
 
+Temperature replica-exchange enhanced sampling, starting from a designed/folded input
+pose — never an unfolded state. Primarily used for **stability/rigidity** characterization
+(objective #1), **flexible-region** identification (#2), and **variant comparison** —
+running the same protocol on several design variants to see which best retains its
+designed conformation (#3).
+
 Generated from `REMD-gromacs.sbatch`. The top-level output directory is set by `OUTDIR` in the submit script, e.g.:
 
 ```
@@ -166,6 +172,13 @@ A plain-text record of all simulation parameters (force field, temperatures, tim
 |------|---------|
 | Check EM converged | `em/em.log` — look for `Fmax <` line |
 | Check density equilibration | `npt/volume_seg*.xvg` |
-| Check REMD exchange rates | `prod/rep000/remd.log` — grep `Repl  average probabilities` |
-| Demux to continuous-T trajectories | `gmx demux prod/rep000/remd.log` |
-| Analyze lowest-T ensemble | `trajectories/remd_rep000.xtc` + `prod/rep000/remd.tpr` |
+| Check REMD exchange rates | `python analysis_scripts/remd_acceptance.py OUTDIR` — outputs table + CSV |
+| Analyze lowest-T ensemble | `analysis/remd_rep000_stripped_aligned.xtc` (protein-only, aligned) + `analysis/remd_rep000_stripped_aligned.gro` |
+| RMSD / Rg / RMSF / DSSP | `analysis/remd_rep000_{rmsd,rg,rmsf,dssp}.*` |
+| Conformational states | `analysis/clustering/remd_rep000_cluster_summary.txt` + `remd_rep000_cluster_rep_c*.pdb` (representative structures); `_cluster_{populations,timeseries}.png`, `_cluster_assignments.csv` |
+| Re-run post-processing | `bash analysis_scripts/run_analysis.sh OUTDIR 000` (regenerates the whole `analysis/` dir; no resubmission) |
+| Inspect with solvent | `bash analysis_scripts/fix_PBC.sh prod/rep000/remd.tpr trajectories/remd_rep000.xtc analysis/remd_rep000_pbc.xtc` — keeps full-system trajectory |
+
+> **Note on demux:** `gmx demux` follows a single *configuration* as it walks through temperature space. It is NOT needed to obtain the constant-T ensemble. `rep000/remd.xtc` already is the 300 K ensemble — each replica runs at a fixed temperature and coordinates are exchanged between replicas, so the slot trajectory is the correct thermodynamic ensemble at that temperature.
+
+> **Multi-chain complexes:** if the system has >1 protein chain, the analysis auto-uses the `multichain_*` pipeline (keeps the chains in one periodic image via `-pbc cluster`, REMD-safe) and adds per-chain RMSD/RMSF + an inter-chain minimum-distance curve (`remd_rep000_chain{A,B,…}_{rmsd,rmsf}.*`, `remd_rep000_interchain_mindist.*`). Core files are unchanged. See `analysis_scripts/README.md` → "Multi-chain complexes".

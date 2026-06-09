@@ -1,16 +1,31 @@
-# GROMACS REMD Pipeline - UNSTABLE
+# GROMACS Structure-Characterization Pipelines - UNSTABLE
 
 # warning - This pipeline is under active development
 
 
-Temperature Replica Exchange MD (T-REMD) pipeline for GROMACS 2024.3, designed for single-node GPU clusters (SLURM). Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
+GROMACS 2024.3 pipelines for characterizing **designed protein structures** on single-node GPU clusters (SLURM). Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
+
+Two engines are provided:
+- **T-REMD** (`submit_REMD.sh`) — temperature replica-exchange enhanced sampling
+- **Plain production MD** (`submit_MD.sh`) — single-temperature NPT production
+
+## Purpose
+
+Every run starts from a folded/designed input structure — **never** from an unfolded or extended state. The tools serve four objectives:
+
+1. **Stability/rigidity** characterization of a given starting (designed) structure
+2. Identifying **flexible regions** (per-residue)
+3. **Variant comparison** — run the same protocol on several design variants and see which best retains its designed conformation
+4. **Bound-state sampling** — simulate a complex in its bound pose and sample the bound ensemble
+
+Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for **#1–3**. The input pose is the reference the analysis is measured against (RMSD = drift from the design, RMSF = local flexibility).
 
 ---
 
 ## Prerequisites
 
 - GROMACS 2024.3 compiled with MPI + CUDA (see `installation_scripts/`)
-- Python 3 (standard library only; used for inline temperature ladder and convergence calculations)
+- A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `installation_scripts/environment.yml` — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
 - SLURM with GPU access
 
 A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identically to a plain build and additionally enables the REST2 pipeline (`dev/`). A plain build works for T-REMD only.
@@ -22,9 +37,17 @@ A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identic
 1. **Edit `site_config.sh`** in the repo root. Set:
    - `GMXRC` — path to your `bin/GMXRC` from the GROMACS installation
    - `SCRATCH_ROOT` — fast scratch storage root for trajectory files (~100 GB per job)
-   - `SBATCH_PARTITION`, `SBATCH_GPU_TYPE`, `SBATCH_GPUS_PER_NODE` — your cluster's SLURM settings
+   - `CUDA_MODULE`, `OPENMPI_MODULE` — your cluster's module names
+   - `CONDA_MODULE`, `GROMD_ENV` — module providing conda and the analysis env name
 
-2. That's it. The pipeline scripts source `site_config.sh` automatically.
+2. **Create the analysis conda env** (once per cluster, on a login node):
+   ```bash
+   bash installation_scripts/install_python_env.sh
+   ```
+   This builds `groMD_env` from `installation_scripts/environment.yml`. The
+   pipeline activates it automatically for the post-analysis steps.
+
+3. That's it. The pipeline scripts source `site_config.sh` automatically.
 
 ---
 
@@ -47,7 +70,7 @@ All job parameters live in the submit script — no separate config file needed.
 
 ## Pipeline Overview
 
-The engine script (`gromacs_scripts/REMD-gromacs.sbatch`) runs 12 steps:
+The engine script (`gromacs_scripts/REMD-gromacs.sbatch`) runs 13 steps:
 
 | Step | Description |
 |------|-------------|
@@ -63,6 +86,7 @@ The engine script (`gromacs_scripts/REMD-gromacs.sbatch`) runs 12 steps:
 | 9 | Run T-REMD production |
 | 10 | Finalize outputs, create trajectory symlinks |
 | 11 | Write parameters log |
+| 12 | Post-analysis: acceptance rates + PBC fix + strip/align (rep000) |
 
 See `gromacs_scripts/REMD-output-guide.md` for a full description of all output files.
 
@@ -77,11 +101,12 @@ Large trajectory files (`.xtc`) are written to `SCRATCH_ROOT` and symlinked into
 - `prod/rep000/remd.xtc` is the 300 K constant-temperature trajectory — use it directly for analysis.
 - No demux step is needed.
 
-Check exchange acceptance rates:
+Post-analysis runs automatically at the end of each job. To re-run manually:
 ```bash
-grep 'Repl  average probabilities' OUTDIR/prod/rep000/remd.log
+python analysis_scripts/remd_acceptance.py    OUTDIR        # acceptance rates (target 20–30%)
+bash   analysis_scripts/fix_PBC_strip_align.sh OUTDIR 000   # PBC fix + strip + align
 ```
-Target: ~20–40% acceptance between adjacent replicas.
+See `analysis_scripts/README.md` for the full script reference.
 
 ---
 
@@ -104,7 +129,7 @@ gromacs_REMD/
 │   ├── REMD-gromacs.sbatch    # T-REMD engine (do not edit)
 │   ├── config_example.sh      # Job config template (copy and edit)
 │   └── REMD-output-guide.md   # Full output file reference
-├── analysis_scripts/           # Post-processing tools (to be added)
+├── analysis_scripts/           # Post-processing tools (see analysis_scripts/README.md)
 ├── dev/                        # REST2 pipeline (in development)
 ├── installation_scripts/       # GROMACS + PLUMED build scripts
 └── example/

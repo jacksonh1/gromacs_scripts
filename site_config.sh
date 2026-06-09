@@ -25,3 +25,27 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-/orcd/data/keating/001/${USER}/MD}"
 # ── Cluster modules ───────────────────────────────────────────────────────────
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.9.1}"
 OPENMPI_MODULE="${OPENMPI_MODULE:-openmpi/5.0.8}"
+
+# ── Python / conda environment (analysis + plotting) ──────────────────────────
+# The post-analysis tools (matplotlib, mdanalysis, numpy, …) run in a conda env
+# created from installation_scripts/environment.yml. Create it once with
+# installation_scripts/install_python_env.sh.
+#
+# CONDA_MODULE — module that provides conda/mamba (miniforge on this cluster).
+# GROMD_ENV    — name of the conda env (matches `name:` in environment.yml).
+CONDA_MODULE="${CONDA_MODULE:-miniforge/25.11.0-0}"
+GROMD_ENV="${GROMD_ENV:-groMD_env}"
+
+# Activate the analysis/plotting conda env. Call this immediately before the
+# Python analysis tools — NOT around the mdrun steps, so conda's libraries can't
+# interfere with the GROMACS MPI/CUDA runtime. Preserves the caller's `set -u`
+# state (conda's activation scripts reference unset variables).
+activate_python_env() {
+  module load "$CONDA_MODULE"
+  local had_u=0; [[ $- == *u* ]] && had_u=1
+  set +u
+  eval "$(conda shell.bash hook)"
+  conda activate "$GROMD_ENV"
+  (( had_u )) && set -u
+  return 0
+}

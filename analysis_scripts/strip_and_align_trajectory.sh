@@ -2,33 +2,39 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # strip_and_align_trajectory.sh — strip waters/ions and align protein
 # ─────────────────────────────────────────────────────────────────────────────
-# Requires process_trajectory.sh to have been run first (needs the
-# PBC-corrected trajectory in OUTDIR/analysis/).
+# Layout-blind: takes explicit input paths and an output prefix, so the same
+# script works for any pipeline (plain MD, T-REMD, …).
+#
+# Requires a PBC-corrected, full-system trajectory (run fix_PBC.sh first).
 #
 # Usage:
-#   bash strip_and_align_trajectory.sh OUTDIR [REP] [REF_GRO]
+#   bash strip_and_align_trajectory.sh TPR PBC_XTC OUT_PREFIX [REF_GRO]
 #
-#   OUTDIR    path to the job output directory
-#   REP       replica index (default: 000 — the 300 K replica)
-#   REF_GRO   reference structure for alignment (default: first frame of the
-#             PBC-corrected trajectory)
+#   TPR         run input matching the PBC_XTC atom count (full system)
+#   PBC_XTC     PBC-corrected, full-system trajectory (from fix_PBC.sh)
+#   OUT_PREFIX  output path stem; the script writes a matched pair (same stem):
+#                 <OUT_PREFIX>_stripped_aligned.xtc  protein-only, backbone-aligned
+#                                                    trajectory (kept)
+#                 <OUT_PREFIX>_stripped_aligned.gro  its first frame — the protein-only
+#                                                    structure/reference for that
+#                                                    trajectory's analysis (kept)
+#               and one internal throwaway:
+#                 <OUT_PREFIX>_frame0_fullsys.gro    full-system first frame, used as
+#                                                    -s to match the XTC atom count,
+#                                                    then deleted
+#   REF_GRO     optional full-system reference structure to align to instead of
+#               the first trajectory frame
 #
-# Output written to: OUTDIR/analysis/
-#   remd_rep<REP>_ref_full.gro — full-system first frame (internal; used as -s
-#                                for the fitting call to match XTC atom count)
-#   remd_rep<REP>_ref.gro      — protein-only first frame (use this as the
-#                                reference structure for RMSD, clustering, etc.)
-#   remd_rep<REP>_fit.xtc      — protein-only trajectory, backbone-aligned
-#
-# Alignment: backbone fit (N, CA, C, O) to REF_GRO; protein atoms output.
+# Alignment: backbone fit (N, CA, C, O) to the reference; protein atoms output.
 # Stripping: waters and ions are dropped by selecting the Protein output group.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-OUTDIR="${1:?Usage: bash strip_and_align_trajectory.sh OUTDIR [REP] [REF_GRO]}"
-REP="${2:-000}"
-REF_GRO="${3:-}"
+TPR="${1:?Usage: bash strip_and_align_trajectory.sh TPR PBC_XTC OUT_PREFIX [REF_GRO]}"
+PBC_XTC="${2:?Usage: bash strip_and_align_trajectory.sh TPR PBC_XTC OUT_PREFIX [REF_GRO]}"
+OUT_PREFIX="${3:?Usage: bash strip_and_align_trajectory.sh TPR PBC_XTC OUT_PREFIX [REF_GRO]}"
+REF_GRO="${4:-}"
 
 # ── Locate GROMACS ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,20 +49,18 @@ elif command -v gmx &>/dev/null; then GMX="gmx"
 else echo "[ERROR] No GROMACS binary found. Source your GMXRC or set GROMACS_SCRIPTS_DIR."; exit 1
 fi
 
-# ── Input files ───────────────────────────────────────────────────────────────
-TPR="${OUTDIR}/prod/rep${REP}/remd.tpr"
-PBC_XTC="${OUTDIR}/analysis/remd_rep${REP}_pbc.xtc"
-
+# ── Validate inputs ───────────────────────────────────────────────────────────
 [[ -f "$TPR" ]]     || { echo "[ERROR] TPR not found: $TPR"; exit 1; }
 [[ -f "$PBC_XTC" ]] || { echo "[ERROR] PBC-corrected XTC not found: $PBC_XTC"
-                          echo "        Run process_trajectory.sh first."; exit 1; }
+                          echo "        Run fix_PBC.sh first."; exit 1; }
 
-ANALYSIS_DIR="${OUTDIR}/analysis"
+mkdir -p "$(dirname "$OUT_PREFIX")"
+
 # Full-system GRO — used as -s for gmx trjconv fitting (must match XTC atom count)
-REF_FULL="${ANALYSIS_DIR}/remd_rep${REP}_ref_full.gro"
+REF_FULL="${OUT_PREFIX}_frame0_fullsys.gro"
 # Protein-only GRO — the reference structure for downstream analysis (RMSD, etc.)
-REF_PROTEIN="${ANALYSIS_DIR}/remd_rep${REP}_ref.gro"
-OUT_XTC="${ANALYSIS_DIR}/remd_rep${REP}_fit.xtc"
+REF_PROTEIN="${OUT_PREFIX}_stripped_aligned.gro"
+OUT_XTC="${OUT_PREFIX}_stripped_aligned.xtc"
 
 # ── Reference structure ───────────────────────────────────────────────────────
 # The -s flag passed to gmx trjconv must have the SAME atom count as the XTC
@@ -64,8 +68,8 @@ OUT_XTC="${ANALYSIS_DIR}/remd_rep${REP}_fit.xtc"
 # truncates the trajectory read and causes the Jacobi rotation fitting to fail.
 #
 # We therefore extract two versions of frame 0:
-#   _ref_full.gro  — full system, used internally as -s for the fitting call
-#   _ref.gro       — protein-only, the reference for downstream analysis
+#   _frame0_fullsys.gro    — full system, used internally as -s for the fitting call
+#   _stripped_aligned.gro  — protein-only, the reference for downstream analysis
 #
 # Custom: provide a full-system GRO/PDB as REF_GRO to align to a specific
 # structure instead of the first trajectory frame.
@@ -81,6 +85,9 @@ if [[ -z "$REF_GRO" ]]; then
 else
   echo "[INFO] Using provided reference: $REF_GRO"
   [[ -f "$REF_GRO" ]] || { echo "[ERROR] Reference not found: $REF_GRO"; exit 1; }
+  # Still need a protein-only reference for downstream analysis.
+  printf "Protein\n" | $GMX trjconv \
+    -s "$TPR" -f "$PBC_XTC" -o "$REF_PROTEIN" -dump 0
 fi
 
 # ── Strip and align ───────────────────────────────────────────────────────────
@@ -96,6 +103,9 @@ printf "Backbone\nProtein\n" | $GMX trjconv \
   -f "$PBC_XTC" \
   -o "$OUT_XTC" \
   -fit rot+trans
+
+# The full-system reference is only needed as the -s for the fit call above.
+rm -f "$REF_FULL"
 
 echo ""
 echo "[OK] Done."

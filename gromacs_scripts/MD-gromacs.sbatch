@@ -1,32 +1,43 @@
 #!/bin/bash
-#SBATCH --job-name=remd
+#SBATCH --job-name=md
 #SBATCH -p pi_keating
 #SBATCH --nodes=1
-#SBATCH --ntasks=48
-#SBATCH --gres=gpu:l40s:4
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=100G
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH -t 4-00:00:00
 #SBATCH -o ./logs/%x_%j.out
 #SBATCH -e ./logs/%x_%j.err
 
 ###############################################################################
-# GROMACS T-REMD single-node workflow
+# GROMACS plain production MD single-node workflow
 # ---------------------------------------------------------------------------
+# Standard single-temperature MD pipeline (no replica exchange):
+#   EM → NVT (heat, restrained) → NPT (density, restrained, iterative)
+#      → NPT (unrestrained equilibration) → NPT production → post-analysis.
+# Restraints (-DPOSRES on protein heavy atoms) are held through EM/NVT/NPT-density
+# to preserve the input structure, then released for the unrestrained equilibration
+# so production records a clean equilibrium ensemble. Equilibration and production
+# share one ensemble (V-rescale + C-rescale).
+#
 # Intended usage:
-#   Copy example/submit_jobs/submit_REMD.sh, set your parameters, run it.
+#   Copy example/submit_jobs/submit_MD.sh, set your parameters, run it.
 #   That script sets GROMACS_SCRIPTS_DIR and passes parameters via --export.
 #
 # Advanced / direct usage:
-#   sbatch --export=ALL,PDB_IN=my.pdb,... REMD-gromacs.sbatch
-#   sbatch REMD-gromacs.sbatch config.sh   # source a config file as $1
+#   sbatch --export=ALL,PDB_IN=my.pdb,... MD-gromacs.sbatch
+#   sbatch MD-gromacs.sbatch config.sh   # source a config file as $1
+#
+# NOTE: this build ships only `gmx_mpi` (no `gmx`/`gmx mdrun`). Every step —
+# including production — runs as a single-rank `gmx_mpi mdrun` with no mpirun.
 ###############################################################################
 
 set -euo pipefail
 
 CURRENT_TIME=$(date +%s)
 CURRENT_STEP=0
-PRESERVE_FROM_STEP=${PRESERVE_FROM_STEP:-9}
+PRESERVE_FROM_STEP=${PRESERVE_FROM_STEP:-7}   # preserve scratch from production on
 
 # ── Source optional config file ──────────────────────────────────────────────
 if [[ -n "${1:-}" && -f "$1" ]]; then
@@ -40,7 +51,7 @@ fi
 ###############################################################################
 echo "===== JOB START $(date) ====="
 
-: "${GROMACS_SCRIPTS_DIR:?GROMACS_SCRIPTS_DIR is not set — submit via example/submit_jobs/submit_REMD.sh}"
+: "${GROMACS_SCRIPTS_DIR:?GROMACS_SCRIPTS_DIR is not set — submit via example/submit_jobs/submit_MD.sh}"
 source "${GROMACS_SCRIPTS_DIR}/../site_config.sh"
 
 module purge
@@ -51,7 +62,7 @@ module load "$OPENMPI_MODULE"
 set +u
 source "$GMXRC"
 set -u
-GMX="${GMX:-gmx_mpi}"          # this build ships only gmx_mpi (no plain 'gmx mdrun')
+GMX="${GMX:-gmx_mpi}"          # this build provides gmx_mpi only
 
 # Verify GROMACS is available
 command -v "$GMX" >/dev/null 2>&1 || { echo "[ERROR] $GMX not found"; exit 1; }
@@ -65,49 +76,41 @@ echo "===== STEP 1: Setting parameters ====="
 
 PDB_IN="${PDB_IN:-IL7-2-V3-cys.pdb}"
 OUTBASE="${OUTBASE:-IL7-2-V3-cys}"
-OUTDIR="${OUTDIR:-remd_${OUTBASE}}"
-FORCE="${FORCE:-0}"
+OUTDIR="${OUTDIR:-md_${OUTBASE}}"
 
 # Force field & water model
-FF="${FF:-amber99sb-ildn}"          # GROMACS ff name
+FF="${FF:-amber99sb-ildn}"
 WATER="${WATER:-tip3p}"
-BOX_SHAPE="${BOX_SHAPE:-dodecahedron}"   # dodecahedron ≈ truncated octahedron
-BOX_BUFFER="${BOX_BUFFER:-1.0}"          # nm (GROMACS uses nm; 10 Å = 1.0 nm)
+BOX_SHAPE="${BOX_SHAPE:-dodecahedron}"
+BOX_BUFFER="${BOX_BUFFER:-1.0}"          # nm
 NEUTRALIZE="${NEUTRALIZE:-1}"
 SALT_MOLAR="${SALT_MOLAR:-0.15}"
 
 # Simulation parameters
-REPLICAS=${SLURM_NTASKS:-${REPLICAS:-48}}
-
-# OpenMP threads for the SERIAL prep steps (EM, NPT density). These run as a
-# single rank before the replicas exist, so they may use the whole node: derive
-# the count from the full allocation (ntasks × cpus-per-task), capped at 8 to stay
-# in GROMACS' good OpenMP-scaling range and to never request more threads than
-# cores. Overridable via NTOMP_SERIAL. (The multi-replica NVT/production steps use
-# one rank per replica with -ntomp 1 instead — see STEPS 7 and 9.)
-_NODE_CORES=$(( ${SLURM_NTASKS:-1} * ${SLURM_CPUS_PER_TASK:-1} ))
-NTOMP_SERIAL="${NTOMP_SERIAL:-$(( _NODE_CORES < 8 ? _NODE_CORES : 8 ))}"
-
 DT_PS="${DT_PS:-0.002}"
-T_MIN="${T_MIN:-300}"
-T_MAX="${T_MAX:-400}"
-CUTOFF_NM="${CUTOFF_NM:-1.0}"           # 10 Å = 1.0 nm
-GAMMA_LN="${GAMMA_LN:-2.0}"             # ps^-1  (tau_t = 1/gamma)
+T_SIM="${T_SIM:-300}"                     # single production temperature (K)
+CUTOFF_NM="${CUTOFF_NM:-1.0}"             # 10 Å = 1.0 nm
+GAMMA_LN="${GAMMA_LN:-2.0}"               # ps^-1  (tau_t = 1/gamma)
 TAU_T=$(python3 -c "print(f'{1.0/float(\"${GAMMA_LN}\"):.4f}')")
 
-# REMD exchange & production
-REPLEX_PS="${REPLEX_PS:-0.5}"            # attempt exchange every this many ps
-TOTAL_NS="${TOTAL_NS:-20}"               # total production per replica (ns)
-REPLEX_STEPS=$(python3 -c "print(int(round(float('${REPLEX_PS}')/float('${DT_PS}'))))")
+# Production
+TOTAL_NS="${TOTAL_NS:-100}"               # total production (ns)
+TRAJ_PS="${TRAJ_PS:-10}"                  # write a trajectory frame every this many ps
 PROD_NSTEPS=$(python3 -c "print(int(round(float('${TOTAL_NS}')*1000/float('${DT_PS}'))))")
+NSTXOUT_COMP=$(python3 -c "print(int(round(float('${TRAJ_PS}')/float('${DT_PS}'))))")
 
 # Equilibration
-EQUI_NS="${EQUI_NS:-0.2}"               # NVT equil length per replica (ns)
+EQUI_NS="${EQUI_NS:-0.2}"                 # NVT heat length (ns)
 EQUI_NSTEPS=$(python3 -c "print(int(round(float('${EQUI_NS}')*1000/float('${DT_PS}'))))")
 NPT_SEG_STEPS="${NPT_SEG_STEPS:-10000}"
 NPT_MIN_SEG="${NPT_MIN_SEG:-8}"
 NPT_MAX_SEG="${NPT_MAX_SEG:-20}"
 NPT_TOL_REL="${NPT_TOL_REL:-0.005}"
+EQ_NPT_NS="${EQ_NPT_NS:-0}"               # unrestrained NPT equil after density (ns); 0 = OFF, restraints release at production start
+EQ_NPT_NSTEPS=$(python3 -c "print(int(round(float('${EQ_NPT_NS}')*1000/float('${DT_PS}'))))")
+
+# CPU threads for the single-rank mdrun
+NTOMP="${NTOMP:-${SLURM_CPUS_PER_TASK:-8}}"
 
 # Scratch — large trajectory files go here
 SCRATCH_TS="$(date +%Y%m%d-%H%M%S)"
@@ -141,43 +144,16 @@ fi
 mkdir -p "${OUTDIR}"/{build,em,npt,nvt,prod,logs,trajectories} ./logs
 
 [[ -f "$PDB_IN" ]] || { echo "[ERROR] PDB not found: $PDB_IN"; exit 1; }
-echo "[OK] Parameters set  (${REPLICAS} replicas, ${T_MIN}–${T_MAX} K, ${TOTAL_NS} ns)"
+echo "[OK] Parameters set  (T=${T_SIM} K, ${TOTAL_NS} ns, ${NTOMP} OMP threads)"
 
 ###############################################################################
-# STEP 2 — Temperature ladder
+# STEP 2 — Build system (pdb2gmx → editconf → solvate → genion)
 ###############################################################################
 CURRENT_STEP=2
-echo "===== STEP 2: Temperature ladder ====="
-
-TEMPS=$(python3 - <<'PY'
-import os, sys
-n  = int(os.environ.get("REPLICAS", 48))
-t0 = float(os.environ.get("T_MIN", 300))
-t1 = float(os.environ.get("T_MAX", 400))
-tl = os.environ.get("TEMPS_LIST", "").strip()
-if tl:
-    ts = [float(x) for x in tl.split(",")]
-else:
-    r = (t1/t0)**(1/(n-1)) if n > 1 else 1.0
-    ts = [t0 * r**i for i in range(n)]
-if len(ts) != n:
-    print(f"[ERROR] {len(ts)} temps but {n} replicas", file=sys.stderr)
-    sys.exit(1)
-print(",".join(f"{t:.3f}" for t in ts))
-PY
-)
-IFS=, read -r -a TARR <<< "$TEMPS"
-echo "[OK] ${#TARR[@]} temperatures: ${TARR[0]} … ${TARR[-1]} K"
-
-###############################################################################
-# STEP 3 — Build system (pdb2gmx → editconf → solvate → genion)
-###############################################################################
-CURRENT_STEP=3
-echo "===== STEP 3: Building system ====="
+echo "===== STEP 2: Building system ====="
 
 BUILD="${OUTDIR}/build"
 
-# pdb2gmx — generate topology
 echo "[INFO] Running pdb2gmx (ff=${FF}, water=${WATER})…"
 $GMX pdb2gmx \
   -f "$PDB_IN" \
@@ -187,7 +163,6 @@ $GMX pdb2gmx \
   -ff "$FF" -water "$WATER" -ignh \
   > "${BUILD}/pdb2gmx.log" 2>&1
 
-# editconf — set box
 echo "[INFO] Setting up ${BOX_SHAPE} box with ${BOX_BUFFER} nm buffer…"
 $GMX editconf \
   -f "${BUILD}/${OUTBASE}_processed.gro" \
@@ -195,7 +170,6 @@ $GMX editconf \
   -bt "$BOX_SHAPE" -d "$BOX_BUFFER" -c \
   > "${BUILD}/editconf.log" 2>&1
 
-# solvate
 echo "[INFO] Solvating…"
 $GMX solvate \
   -cp "${BUILD}/${OUTBASE}_box.gro" \
@@ -204,8 +178,6 @@ $GMX solvate \
   -p "${BUILD}/${OUTBASE}.top" \
   > "${BUILD}/solvate.log" 2>&1
 
-# genion — neutralize + add salt
-# We need a dummy .tpr for genion, so write a minimal ions.mdp
 cat > "${BUILD}/ions.mdp" <<EOF
 integrator = steep
 nsteps     = 0
@@ -235,17 +207,16 @@ echo SOL | $GMX genion \
   ${GENION_FLAGS} \
   > "${BUILD}/genion.log" 2>&1
 
-# Final system files — these are our "topology" equivalents of prmtop/inpcrd
 SYS_GRO="${BUILD}/${OUTBASE}_ions.gro"
 SYS_TOP="${BUILD}/${OUTBASE}.top"
 [[ -f "$SYS_GRO" && -f "$SYS_TOP" ]] || { echo "[ERROR] System build failed"; exit 1; }
 echo "[OK] System built"
 
 ###############################################################################
-# STEP 4 — Energy minimization
+# STEP 3 — Energy minimization
 ###############################################################################
-CURRENT_STEP=4
-echo "===== STEP 4: Energy minimization ====="
+CURRENT_STEP=3
+echo "===== STEP 3: Energy minimization ====="
 
 EM_DIR="${OUTDIR}/em"
 cat > "${EM_DIR}/em.mdp" <<EOF
@@ -278,20 +249,86 @@ $GMX grompp \
 
 $GMX mdrun \
   -v -deffnm "${EM_DIR}/em" \
-  -ntomp "$NTOMP_SERIAL" \
+  -ntomp "$NTOMP" \
   > "${EM_DIR}/mdrun_em.log" 2>&1
 
 [[ -f "${EM_DIR}/em.gro" ]] || { echo "[ERROR] Minimization failed"; exit 1; }
 echo "[OK] Minimization complete"
 
 ###############################################################################
-# STEP 5 — NPT density equilibration (iterative convergence)
+# STEP 4 — NVT equilibration (restrained, heat to T_SIM)
+###############################################################################
+CURRENT_STEP=4
+echo "===== STEP 4: NVT equilibration (restrained) ====="
+
+NVT_DIR="${OUTDIR}/nvt"
+cat > "${NVT_DIR}/nvt.mdp" <<EOF
+integrator  = md
+dt          = ${DT_PS}
+nsteps      = ${EQUI_NSTEPS}
+nstxout-compressed = 2500
+nstlog      = 1000
+nstenergy   = 1000
+
+cutoff-scheme = Verlet
+nstlist     = 10
+coulombtype = PME
+rcoulomb    = ${CUTOFF_NM}
+rvdw        = ${CUTOFF_NM}
+DispCorr    = EnerPres
+pbc         = xyz
+
+tcoupl      = V-rescale
+tc-grps     = Protein Non-Protein
+tau-t       = ${TAU_T} ${TAU_T}
+ref-t       = ${T_SIM} ${T_SIM}
+
+pcoupl      = no
+
+constraints = h-bonds
+constraint-algorithm = LINCS
+
+gen-vel     = yes
+gen-temp    = ${T_SIM}
+
+nstcomm     = 500
+
+; Restrain protein heavy atoms while solvent relaxes around the structure
+define      = -DPOSRES
+EOF
+
+# NVT continues from the minimized structure (em/em.gro), NOT the un-minimized
+# build (SYS_GRO) — feeding SYS_GRO here discards EM and starts NVT on clashing
+# coordinates, which explodes at step 0 (LINCS error / huge +LJ). The position-
+# restraint reference (-r) is the same minimized structure.
+$GMX grompp \
+  -f "${NVT_DIR}/nvt.mdp" \
+  -c "${EM_DIR}/em.gro" \
+  -r "${EM_DIR}/em.gro" \
+  -p "$SYS_TOP" \
+  -o "${NVT_DIR}/nvt.tpr" \
+  -po "${NVT_DIR}/mdout_nvt.mdp" \
+  -maxwarn 5 \
+  > "${NVT_DIR}/grompp.log" 2>&1
+
+$GMX mdrun \
+  -deffnm "${NVT_DIR}/nvt" \
+  -x "${SCRATCH_DIR}/nvt.xtc" \
+  -ntomp "$NTOMP" -nb gpu -pme gpu -bonded gpu -pin on \
+  > "${OUTDIR}/logs/mdrun_nvt_equil.log" 2>&1
+
+[[ -f "${NVT_DIR}/nvt.gro" ]] || { echo "[ERROR] NVT equilibration failed"; exit 1; }
+echo "[OK] NVT equilibration done"
+
+###############################################################################
+# STEP 5 — NPT density equilibration (restrained, iterative convergence)
 ###############################################################################
 CURRENT_STEP=5
 echo "===== STEP 5: NPT density equilibration (iterative) ====="
 
 NPT_DIR="${OUTDIR}/npt"
-LAST_GRO="${EM_DIR}/em.gro"
+LAST_GRO="${NVT_DIR}/nvt.gro"
+LAST_CPT="${NVT_DIR}/nvt.cpt"
 prev_vol=""
 seg=0
 
@@ -299,24 +336,10 @@ while (( seg < NPT_MAX_SEG )); do
   seg=$((seg+1))
   echo "[INFO] NPT segment $seg"
 
-  if (( seg == 1 )); then
-    GEN_VEL="yes"
-    GEN_TEMP="${T_MIN}"
-    CONT_FLAGS="gen-vel = yes
-gen-temp = ${T_MIN}"
-    SEG_DT="0.001"
-    SEG_STEPS="${NPT_SEG_STEPS}"
-  else
-    CONT_FLAGS="gen-vel = no
-continuation = yes"
-    SEG_DT="${DT_PS}"
-    SEG_STEPS="${NPT_SEG_STEPS}"
-  fi
-
   cat > "${NPT_DIR}/npt_seg${seg}.mdp" <<EOF
 integrator  = md
-dt          = ${SEG_DT}
-nsteps      = ${SEG_STEPS}
+dt          = ${DT_PS}
+nsteps      = ${NPT_SEG_STEPS}
 nstxout-compressed = 1000
 nstlog      = 1000
 nstenergy   = 1000
@@ -332,7 +355,7 @@ pbc         = xyz
 tcoupl      = V-rescale
 tc-grps     = Protein Non-Protein
 tau-t       = ${TAU_T} ${TAU_T}
-ref-t       = ${T_MIN} ${T_MIN}
+ref-t       = ${T_SIM} ${T_SIM}
 
 pcoupl      = C-rescale
 pcoupltype  = isotropic
@@ -344,7 +367,8 @@ refcoord-scaling = com
 constraints = h-bonds
 constraint-algorithm = LINCS
 
-${CONT_FLAGS}
+gen-vel     = no
+continuation = yes
 
 define      = -DPOSRES
 EOF
@@ -353,6 +377,7 @@ EOF
     -f "${NPT_DIR}/npt_seg${seg}.mdp" \
     -c "$LAST_GRO" \
     -r "$LAST_GRO" \
+    -t "$LAST_CPT" \
     -p "$SYS_TOP" \
     -o "${NPT_DIR}/npt_seg${seg}.tpr" \
     -po "${NPT_DIR}/mdout_npt${seg}.mdp" \
@@ -362,7 +387,7 @@ EOF
   $GMX mdrun \
     -deffnm "${NPT_DIR}/npt_seg${seg}" \
     -x "${SCRATCH_DIR}/${OUTBASE}_npt_seg${seg}.xtc" \
-    -ntomp "$NTOMP_SERIAL" -nb gpu -pme gpu -bonded gpu \
+    -ntomp "$NTOMP" -nb gpu -pme gpu -bonded gpu -pin on \
     > "${NPT_DIR}/mdrun_npt${seg}.log" 2>&1
 
   # Extract volume
@@ -393,6 +418,7 @@ print(abs(curr-prev)/prev if prev!=0 else 1.0)
 
   prev_vol="$vol_avg"
   LAST_GRO="${NPT_DIR}/npt_seg${seg}.gro"
+  LAST_CPT="${NPT_DIR}/npt_seg${seg}.cpt"
 done
 
 if (( seg == NPT_MAX_SEG )); then
@@ -401,28 +427,33 @@ fi
 
 NPT_GRO="${NPT_DIR}/npt_seg${seg}.gro"
 NPT_CPT="${NPT_DIR}/npt_seg${seg}.cpt"
-[[ -f "$NPT_GRO" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
+[[ -f "$NPT_GRO" && -f "$NPT_CPT" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
 echo "[OK] NPT density equilibration done"
 
 ###############################################################################
-# STEP 6 — Prepare per-replica NVT equilibration directories
+# STEP 6 — NPT equilibration (unrestrained, production ensemble) — OPTIONAL
 ###############################################################################
+# OFF by default (EQ_NPT_NS=0). Restraints are released either HERE (EQ_NPT_NS>0)
+# or, when this step is skipped, at the start of production.
+#
+# Skipping it (default) makes the analyzed production trajectory CAPTURE the protein
+# relaxing away from its restrained (designed) pose — the signal for stability /
+# flexibility / variant-comparison. Enable it (EQ_NPT_NS>0) when you instead want
+# production to be a pre-equilibrated ensemble (e.g. bound-state sampling) and would
+# rather drop the relaxation transient up front than trim it later. Either way
+# production releases restraints (its mdp has no -DPOSRES) and keeps the same
+# ensemble (V-rescale + C-rescale), so there is no thermostat/barostat switch.
 CURRENT_STEP=6
-echo "===== STEP 6: Preparing per-replica NVT equilibration ====="
+if (( EQ_NPT_NSTEPS > 0 )); then
+echo "===== STEP 6: NPT equilibration (unrestrained, ${EQ_NPT_NS} ns) ====="
 
-NVT_DIR="${OUTDIR}/nvt"
-
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  T=${TARR[$i]}
-  REPDIR="${NVT_DIR}/rep${idx}"
-  mkdir -p "$REPDIR"
-
-  cat > "${REPDIR}/nvt.mdp" <<EOF
+EQ_DIR="${OUTDIR}/eq"
+mkdir -p "$EQ_DIR"
+cat > "${EQ_DIR}/eq.mdp" <<EOF
 integrator  = md
 dt          = ${DT_PS}
-nsteps      = ${EQUI_NSTEPS}
-nstxout-compressed = 2500
+nsteps      = ${EQ_NPT_NSTEPS}
+nstxout-compressed = 5000
 nstlog      = 1000
 nstenergy   = 1000
 
@@ -437,80 +468,59 @@ pbc         = xyz
 tcoupl      = V-rescale
 tc-grps     = Protein Non-Protein
 tau-t       = ${TAU_T} ${TAU_T}
-ref-t       = ${T} ${T}
+ref-t       = ${T_SIM} ${T_SIM}
 
-pcoupl      = no
+pcoupl      = C-rescale
+pcoupltype  = isotropic
+tau-p       = 1.0
+ref-p       = 1.0
+compressibility = 4.5e-5
 
 constraints = h-bonds
 constraint-algorithm = LINCS
 
-gen-vel     = yes
-gen-temp    = ${T}
-
-nstcomm     = 500
+gen-vel     = no
+continuation = yes
 EOF
 
-  $GMX grompp \
-    -f "${REPDIR}/nvt.mdp" \
-    -c "$NPT_GRO" \
-    -r "$NPT_GRO" \
-    -p "$SYS_TOP" \
-    -o "${REPDIR}/nvt.tpr" \
-    -po "${REPDIR}/mdout_nvt.mdp" \
-    -maxwarn 5 \
-    > "${REPDIR}/grompp.log" 2>&1
+$GMX grompp \
+  -f "${EQ_DIR}/eq.mdp" \
+  -c "$NPT_GRO" \
+  -t "$NPT_CPT" \
+  -p "$SYS_TOP" \
+  -o "${EQ_DIR}/eq.tpr" \
+  -po "${EQ_DIR}/mdout_eq.mdp" \
+  -maxwarn 5 \
+  > "${EQ_DIR}/grompp.log" 2>&1
 
-  # Pre-create symlink so deffnm writes the xtc directly to scratch
-  ln -sf "${SCRATCH_DIR}/nvt_rep${idx}.xtc" "${REPDIR}/nvt.xtc"
-done
-echo "[OK] NVT .tpr files prepared for all replicas"
+$GMX mdrun \
+  -deffnm "${EQ_DIR}/eq" \
+  -x "${SCRATCH_DIR}/eq.xtc" \
+  -ntomp "$NTOMP" -nb gpu -pme gpu -bonded gpu -pin on \
+  > "${OUTDIR}/logs/mdrun_eq.log" 2>&1
+
+EQ_GRO="${EQ_DIR}/eq.gro"
+EQ_CPT="${EQ_DIR}/eq.cpt"
+[[ -f "$EQ_GRO" && -f "$EQ_CPT" ]] || { echo "[ERROR] Unrestrained NPT equilibration failed"; exit 1; }
+echo "[OK] Unrestrained NPT equilibration done"
+else
+echo "===== STEP 6: unrestrained NPT equilibration SKIPPED (EQ_NPT_NS=${EQ_NPT_NS}) ====="
+echo "[INFO] Restraints release at production start; production will capture the"
+echo "[INFO] relaxation from the restrained (designed) pose."
+# Production continues straight from the last restrained NPT-density segment.
+EQ_GRO="$NPT_GRO"
+EQ_CPT="$NPT_CPT"
+fi
 
 ###############################################################################
-# STEP 7 — Run per-replica NVT equilibration
+# STEP 7 — Production NPT (unrestrained, V-rescale + C-rescale)
 ###############################################################################
 CURRENT_STEP=7
-echo "===== STEP 7: Running NVT equilibration ====="
-
-# Build the -multidir list
-MULTIDIR_NVT=""
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  MULTIDIR_NVT+="${NVT_DIR}/rep${idx} "
-done
-
-mpirun -np "$REPLICAS" "$GMX" mdrun \
-  -multidir $MULTIDIR_NVT \
-  -deffnm nvt \
-  -ntomp 1 \
-  -nb gpu -pme gpu -bonded gpu \
-  -pin on \
-  > "${OUTDIR}/logs/mdrun_nvt_equil.log" 2>&1
-
-# Verify all replicas finished
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  [[ -f "${NVT_DIR}/rep${idx}/nvt.gro" ]] || { echo "[ERROR] NVT equil failed for replica $idx"; exit 1; }
-done
-echo "[OK] NVT equilibration done"
-
-###############################################################################
-# STEP 8 — Prepare REMD production inputs
-###############################################################################
-CURRENT_STEP=8
-echo "===== STEP 8: Preparing REMD production inputs ====="
+echo "===== STEP 7: Production NPT ====="
+echo "[INFO] ${TOTAL_NS} ns at ${T_SIM} K, frame every ${TRAJ_PS} ps"
 
 PROD_DIR="${OUTDIR}/prod"
-
-# Output frequency — write trajectory every 10x exchange interval
-NSTXOUT_COMP=$(python3 -c "print(int(${REPLEX_STEPS}*10))")
-
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  T=${TARR[$i]}
-  REPDIR="${PROD_DIR}/rep${idx}"
-  mkdir -p "$REPDIR"
-
-  cat > "${REPDIR}/remd.mdp" <<EOF
+cat > "${PROD_DIR}/md.mdp" <<EOF
 integrator  = md
 dt          = ${DT_PS}
 nsteps      = ${PROD_NSTEPS}
@@ -529,9 +539,13 @@ pbc         = xyz
 tcoupl      = V-rescale
 tc-grps     = Protein Non-Protein
 tau-t       = ${TAU_T} ${TAU_T}
-ref-t       = ${T} ${T}
+ref-t       = ${T_SIM} ${T_SIM}
 
-pcoupl      = no
+pcoupl      = C-rescale
+pcoupltype  = isotropic
+tau-p       = 1.0
+ref-p       = 1.0
+compressibility = 4.5e-5
 
 constraints = h-bonds
 constraint-algorithm = LINCS
@@ -542,99 +556,65 @@ continuation = yes
 nstcomm     = 500
 EOF
 
-  $GMX grompp \
-    -f "${REPDIR}/remd.mdp" \
-    -c "${NVT_DIR}/rep${idx}/nvt.gro" \
-    -t "${NVT_DIR}/rep${idx}/nvt.cpt" \
-    -p "$SYS_TOP" \
-    -o "${REPDIR}/remd.tpr" \
-    -po "${REPDIR}/mdout_remd.mdp" \
-    -maxwarn 5 \
-    > "${REPDIR}/grompp.log" 2>&1
+# Continue from the unrestrained eq if it ran, else directly from the last
+# restrained NPT-density segment — in which case restraints release here, since
+# md.mdp has no -DPOSRES (EQ_GRO/EQ_CPT are set to either source in STEP 6).
+$GMX grompp \
+  -f "${PROD_DIR}/md.mdp" \
+  -c "$EQ_GRO" \
+  -t "$EQ_CPT" \
+  -p "$SYS_TOP" \
+  -o "${PROD_DIR}/md.tpr" \
+  -po "${PROD_DIR}/mdout_md.mdp" \
+  -maxwarn 5 \
+  > "${PROD_DIR}/grompp.log" 2>&1
 
-  # Pre-create symlink so deffnm writes the xtc directly to scratch
-  ln -sf "${SCRATCH_DIR}/remd_rep${idx}.xtc" "${REPDIR}/remd.xtc"
-done
-echo "[OK] REMD .tpr files prepared"
+$GMX mdrun \
+  -deffnm "${PROD_DIR}/md" \
+  -x "${SCRATCH_DIR}/md.xtc" \
+  -ntomp "$NTOMP" -nb gpu -pme gpu -bonded gpu -pin on \
+  > "${OUTDIR}/logs/mdrun_md.log" 2>&1
 
-###############################################################################
-# STEP 9 — Run T-REMD production
-###############################################################################
-CURRENT_STEP=9
-echo "===== STEP 9: Running T-REMD production ====="
-echo "[INFO] ${REPLICAS} replicas × ${TOTAL_NS} ns, exchange every ${REPLEX_PS} ps"
-
-MULTIDIR_PROD=""
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  MULTIDIR_PROD+="${PROD_DIR}/rep${idx} "
-done
-
-mpirun -np "$REPLICAS" "$GMX" mdrun \
-  -multidir $MULTIDIR_PROD \
-  -deffnm remd \
-  -replex "$REPLEX_STEPS" \
-  -ntomp 1 \
-  -nb gpu -pme gpu -bonded gpu \
-  -pin on \
-  > "${OUTDIR}/logs/mdrun_remd.log" 2>&1
-
-# Verify every replica produced a final structure. A nonzero mpirun already aborts
-# via set -e + the ERR trap (which preserves scratch, since step 9 >= PRESERVE_FROM_STEP);
-# this additionally catches a silent partial failure where mdrun returns 0 but a
-# replica wrote no output. Mirrors the NVT-equilibration check in STEP 7.
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  [[ -f "${PROD_DIR}/rep${idx}/remd.gro" ]] || { echo "[ERROR] REMD production failed for replica $idx"; exit 1; }
-done
-echo "[OK] REMD production done"
+[[ -f "${PROD_DIR}/md.gro" ]] || { echo "[ERROR] Production failed"; exit 1; }
+echo "[OK] Production done"
 
 ###############################################################################
-# STEP 10 — Finalize outputs & symlinks
+# STEP 8 — Finalize outputs & symlinks
 ###############################################################################
-CURRENT_STEP=10
-echo "===== STEP 10: Finalizing outputs ====="
+CURRENT_STEP=8
+echo "===== STEP 8: Finalizing outputs ====="
 
 # Symlink large trajectory files from scratch into the output tree
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  for prefix in nvt remd; do
-    src="${SCRATCH_DIR}/${prefix}_rep${idx}.xtc"
-    if [[ -f "$src" ]]; then
-      ln -sf "$src" "${OUTDIR}/trajectories/${prefix}_rep${idx}.xtc"
-    fi
-  done
+for f in "${SCRATCH_DIR}/nvt.xtc" "${SCRATCH_DIR}/eq.xtc" "${SCRATCH_DIR}/md.xtc"; do
+  [[ -f "$f" ]] && ln -sf "$f" "${OUTDIR}/trajectories/$(basename "$f")"
 done
-
-# Symlink NPT trajectories from scratch
 for f in "${SCRATCH_DIR}/${OUTBASE}_npt_seg"*.xtc; do
   [[ -f "$f" ]] && ln -sf "$f" "${OUTDIR}/trajectories/$(basename "$f")"
 done
 
-# Export final PDB from replica 000
+# Export final PDB
 echo 0 | $GMX trjconv \
-  -s "${PROD_DIR}/rep000/remd.tpr" \
-  -f "${PROD_DIR}/rep000/remd.gro" \
-  -o "${OUTDIR}/${OUTBASE}_final_rep000.pdb" \
+  -s "${PROD_DIR}/md.tpr" \
+  -f "${PROD_DIR}/md.gro" \
+  -o "${OUTDIR}/${OUTBASE}_final.pdb" \
   -pbc whole \
   > /dev/null 2>&1 || true
 
 echo "[OK] Outputs finalized"
 
 ###############################################################################
-# STEP 11 — Write parameters log
+# STEP 9 — Write parameters log
 ###############################################################################
-CURRENT_STEP=11
+CURRENT_STEP=9
 ELAPSED_S=$(( $(date +%s) - CURRENT_TIME ))
 
 for dest in "${OUTDIR}/parameters.txt" "${SCRATCH_DIR}/parameters.txt"; do
   cat > "$dest" <<EOF
 Elapsed seconds: $ELAPSED_S
-Job Name: ${SLURM_JOB_NAME:-remd}
+Job Name: ${SLURM_JOB_NAME:-md}
 Job ID: ${SLURM_JOB_ID:-N/A}
-Replicas: $REPLICAS
-Total ns per replica: $TOTAL_NS
-Temperature range: ${T_MIN}–${T_MAX} K
+Total ns: $TOTAL_NS
+Temperature: ${T_SIM} K
 Force field: $FF
 Water model: $WATER
 Box shape: $BOX_SHAPE
@@ -644,45 +624,46 @@ Salt molarity: $SALT_MOLAR
 Cutoff (nm): $CUTOFF_NM
 tau_t (ps): $TAU_T
 Time step (ps): $DT_PS
-Serial-step OMP threads (EM/NPT): $NTOMP_SERIAL
-Exchange interval (ps): $REPLEX_PS
-Exchange interval (steps): $REPLEX_STEPS
+Trajectory frame interval (ps): $TRAJ_PS
 Production steps: $PROD_NSTEPS
+NVT equil ns: $EQUI_NS
+NPT convergence segments: $seg
+Unrestrained NPT equil ns: $EQ_NPT_NS  (0 = disabled; restraints released at production start)
+Production ensemble: NPT (V-rescale + C-rescale)
+OMP threads: $NTOMP
 Output directory: $OUTDIR
 Scratch directory: $SCRATCH_DIR
 GPUs: ${SLURM_GPUS_ON_NODE:-unknown}
-NPT convergence segments: $seg
 EOF
 done
 
 ###############################################################################
-# STEP 12 — Post-analysis (acceptance rates + PBC fix + strip/align, rep000)
+# STEP 10 — Post-analysis (PBC fix + strip/align, then RMSD/Rg/RMSF/DSSP + plots)
 ###############################################################################
-CURRENT_STEP=12
-echo "===== STEP 12: Post-analysis (rep000 / 300 K) ====="
+CURRENT_STEP=10
+echo "===== STEP 10: Post-analysis ====="
 
 ANALYSIS_SCRIPTS_DIR="${GROMACS_SCRIPTS_DIR}/../analysis_scripts"
 
 # The whole post-analysis lives in run_analysis.sh (auto-detects MD vs REMD from
-# the job layout — here it finds prod/rep000/remd.tpr and also runs the REMD-only
-# acceptance-rate QC — activates the Python env, and echoes each [CMD]) so it can
-# be re-run by hand later without resubmitting the simulation:
-#   bash analysis_scripts/run_analysis.sh "$OUTDIR" [REP]
-echo "[CMD] bash ${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh $OUTDIR 000"
-bash "${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh" "$OUTDIR" 000 \
+# the job layout, activates the Python env, and echoes each [CMD] before running)
+# so it can be re-run by hand later without resubmitting the simulation:
+#   bash analysis_scripts/run_analysis.sh "$OUTDIR"
+echo "[CMD] bash ${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh $OUTDIR"
+bash "${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh" "$OUTDIR" \
   || echo "[WARN] run_analysis.sh failed — re-run the command above"
 
 ###############################################################################
-# STEP 13 — Summary
+# STEP 11 — Summary
 ###############################################################################
 echo ""
 echo "=========================================="
 echo "===== JOB COMPLETED $(date) ====="
 echo "=========================================="
-echo "[INFO] Output directory:   $OUTDIR"
-echo "[INFO] Trajectory links:   ${OUTDIR}/trajectories/"
+echo "[INFO] Output directory:    $OUTDIR"
+echo "[INFO] Trajectory links:    ${OUTDIR}/trajectories/"
 echo "[INFO] Actual trajectories: $SCRATCH_DIR"
-echo "[INFO] REMD exchange log:  ${PROD_DIR}/rep000/remd.log  (or check all rep dirs)"
-echo "[INFO] Acceptance rates:   ${OUTDIR}/analysis/remd_acceptance.csv"
-echo "[INFO] Processed traj:     ${OUTDIR}/analysis/remd_rep000_stripped_aligned.xtc"
+echo "[INFO] Production log:       ${PROD_DIR}/md.log"
+echo "[INFO] Processed traj:       ${OUTDIR}/analysis/md_stripped_aligned.xtc"
+echo "[INFO] Analysis plots:       ${OUTDIR}/analysis/md_{rmsd,rg,rmsf,dssp}.png"
 echo "=========================================="

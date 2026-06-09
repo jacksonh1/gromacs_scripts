@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# process_trajectory.sh — fix PBC artifacts in the 300 K REMD trajectory
+# fix_PBC.sh — fix PBC artifacts in a trajectory
 # ─────────────────────────────────────────────────────────────────────────────
+# Layout-blind: takes explicit input/output paths so the same script works for
+# any pipeline (plain MD, T-REMD, …). The caller supplies the concrete paths.
+#
 # Usage:
-#   bash process_trajectory.sh OUTDIR [REP]
+#   bash fix_PBC.sh TPR XTC OUT_PBC_XTC
 #
-#   OUTDIR   path to the job output directory (contains prod/, trajectories/)
-#   REP      replica index to process (default: 000 — the 300 K replica)
-#
-# Output written to: OUTDIR/analysis/remd_rep<REP>_pbc.xtc
+#   TPR          run input matching the XTC atom count (full system)
+#   XTC          raw trajectory to correct
+#   OUT_PBC_XTC  output path for the PBC-corrected (full-system) trajectory
 #
 # PBC treatment: -pbc mol -center -ur compact
 #   - mol:     makes each molecule whole and puts its COM inside the box.
@@ -16,6 +18,11 @@
 #   - center:  centers the protein in the box.
 #   - compact: renders the dodecahedron box as a compact shape; without this
 #              the box looks "exploded" in VMD/PyMOL.
+#
+# This is the SINGLE-CHAIN path. For a multi-chain complex, -pbc mol wraps each
+# chain's COM independently and can split the complex across a box boundary — use
+# the multichain_* analysis scripts instead (run_analysis.sh dispatches on chain
+# count automatically).
 #
 # WARNING: -pbc nojump is intentionally NOT used here. nojump compares
 # consecutive frames to detect box-boundary crossings, but in T-REMD,
@@ -26,8 +33,9 @@
 set -euo pipefail
 
 # ── Arguments ─────────────────────────────────────────────────────────────────
-OUTDIR="${1:?Usage: bash process_trajectory.sh OUTDIR [REP]}"
-REP="${2:-000}"
+TPR="${1:?Usage: bash fix_PBC.sh TPR XTC OUT_PBC_XTC}"
+XTC="${2:?Usage: bash fix_PBC.sh TPR XTC OUT_PBC_XTC}"
+OUT_XTC="${3:?Usage: bash fix_PBC.sh TPR XTC OUT_PBC_XTC}"
 
 # ── Locate GROMACS ────────────────────────────────────────────────────────────
 # Unlike sbatch scripts (which SLURM copies to a temp path), regular scripts
@@ -48,17 +56,11 @@ else
   exit 1
 fi
 
-# ── Input files ───────────────────────────────────────────────────────────────
-TPR="${OUTDIR}/prod/rep${REP}/remd.tpr"
-XTC="${OUTDIR}/trajectories/remd_rep${REP}.xtc"
-
+# ── Validate inputs ───────────────────────────────────────────────────────────
 [[ -f "$TPR" ]] || { echo "[ERROR] TPR not found: $TPR"; exit 1; }
 [[ -f "$XTC" ]] || { echo "[ERROR] XTC not found: $XTC"; exit 1; }
 
-# ── Output ────────────────────────────────────────────────────────────────────
-ANALYSIS_DIR="${OUTDIR}/analysis"
-mkdir -p "$ANALYSIS_DIR"
-OUT_XTC="${ANALYSIS_DIR}/remd_rep${REP}_pbc.xtc"
+mkdir -p "$(dirname "$OUT_XTC")"
 
 echo "[INFO] Input TPR: $TPR"
 echo "[INFO] Input XTC: $XTC"
@@ -77,7 +79,3 @@ printf "Protein\nSystem\n" | $GMX trjconv \
 
 echo ""
 echo "[OK] PBC-corrected trajectory written to: $OUT_XTC"
-echo ""
-echo "Next steps:"
-echo "  Strip waters/ions:  bash strip_trajectory.sh $OUTDIR $REP"
-echo "  Align to reference: use gmx trjconv -fit rot+trans"
