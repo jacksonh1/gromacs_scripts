@@ -3,7 +3,7 @@
 # warning - This pipeline is under active development
 
 
-GROMACS 2024.3 pipelines for characterizing **designed protein structures** on single-node GPU clusters (SLURM). Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
+GROMACS 2024.3 pipelines for characterizing **folded protein structures** on single-node GPU clusters (SLURM). The input can be any folded pose — a de novo design, a crystal/cryo-EM structure, a predicted model, or a mutant variant. Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
 
 Two engines are provided:
 - **T-REMD** (`submit_REMD.sh`) — temperature replica-exchange enhanced sampling
@@ -11,14 +11,14 @@ Two engines are provided:
 
 ## Purpose
 
-Every run starts from a folded/designed input structure — **never** from an unfolded or extended state. The tools serve four objectives:
+The analysis treats the **input pose as the reference** — observables measure how far the structure moves from it, not whether it can be folded from scratch. The tools serve four objectives:
 
-1. **Stability/rigidity** characterization of a given starting (designed) structure
+1. **Stability/rigidity** characterization of a given starting structure
 2. Identifying **flexible regions** (per-residue)
-3. **Variant comparison** — run the same protocol on several design variants and see which best retains its designed conformation
+3. **Variant comparison** — run the same protocol on several variants (mutants, designs, homologues, …) and see which best retains its starting conformation
 4. **Bound-state sampling** — simulate a complex in its bound pose and sample the bound ensemble
 
-Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for **#1–3**. The input pose is the reference the analysis is measured against (RMSD = drift from the design, RMSF = local flexibility).
+Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for **#1–3**. The input pose is the reference the analysis is measured against (RMSD = drift from the input structure, RMSF = local flexibility).
 
 ---
 
@@ -53,10 +53,16 @@ A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identic
 
 ## Running a Job
 
-1. Copy the example submit script and edit your parameters directly in it:
+1. Copy the example submit script for the engine you want and edit your parameters directly
+   in it:
    ```bash
+   # T-REMD:
    cp example/submit_jobs/submit_REMD.sh my_job.sh
-   # edit my_job.sh: set PDB_IN, REPLICAS, T_MAX, TOTAL_NS, etc.
+   # edit my_job.sh: set PDB_IN, REPLICAS, T_MAX, TOTAL_NS, ENSEMBLE, etc.
+
+   # Plain MD:
+   cp example/submit_jobs/submit_MD.sh my_job.sh
+   # edit my_job.sh: set PDB_IN, T_SIM, TOTAL_NS, TRAJ_PS, RELAX_NS, etc.
    ```
 
 2. Run it:
@@ -74,7 +80,12 @@ a clear `[ERROR]` message instead of silently falling back to a default.
 
 ## Pipeline Overview
 
-The engine script (`scripts/simulation/REMD-gromacs.sbatch`) runs 13 steps:
+Both engines share the same system-building, equilibration philosophy (position restraints
+held through equilibration to preserve the input pose), scratch handling, and post-analysis.
+They differ in how production is sampled: T-REMD runs many temperature replicas with
+exchanges; plain MD runs a single trajectory.
+
+### T-REMD — `scripts/simulation/REMD-gromacs.sbatch`
 
 | Step | Description |
 |------|-------------|
@@ -87,12 +98,38 @@ The engine script (`scripts/simulation/REMD-gromacs.sbatch`) runs 13 steps:
 | 6 | Prepare per-replica equilibration inputs (NVT, or NPT if `ENSEMBLE=NPT`) |
 | 7 | Run per-replica equilibration (all replicas in parallel via MPI) |
 | 8 | Prepare REMD production inputs |
-| 9 | Run T-REMD production |
+| 9 | Run T-REMD production (NVT or NPT) |
 | 10 | Finalize outputs, create trajectory symlinks |
 | 11 | Write parameters log |
 | 12 | Post-analysis: acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
 
-See `scripts/simulation/REMD-output-guide.md` for a full description of all output files.
+Stage folders: `build/ → em/ → density/ → equil/ → prod/`. See
+`scripts/simulation/REMD-output-guide.md` for a full description of all output files.
+
+### Plain MD — `scripts/simulation/MD-gromacs.sbatch`
+
+Single-temperature production, always NPT. Mainly for bound-state ensemble sampling (#4),
+and optionally single-structure stability (#1) and flexible-region (#2) characterization.
+
+| Step | Description |
+|------|-------------|
+| 0 | Load environment (modules, GROMACS) |
+| 1 | Set parameters, create scratch and output directories |
+| 2 | Build system: pdb2gmx → editconf → solvate → genion |
+| 3 | Energy minimization (steepest descent) |
+| 4 | Heat to `T_SIM` (NVT, restrained; velocities generated here) |
+| 5 | NPT density equilibration (restrained, iterative, convergence-checked) |
+| 6 | Relax — unrestrained NPT (optional; only if `RELAX_NS > 0`) |
+| 7 | Run production MD (NPT, unrestrained) |
+| 8 | Finalize outputs, create trajectory symlinks |
+| 9 | Write parameters log |
+| 10 | Post-analysis: PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering |
+
+Stage folders: `build/ → em/ → heat/ → density/ → [relax/] → prod/`. By default
+(`RELAX_NS=0`) restraints release at the **start of production**, so the trajectory captures
+the protein relaxing away from the input pose; set `RELAX_NS > 0` to equilibrate first so
+production starts pre-relaxed (e.g. for bound-state sampling). See
+`scripts/simulation/MD-output-guide.md` for a full description of all output files.
 
 ### Production ensemble (`ENSEMBLE=NVT|NPT`)
 
@@ -111,17 +148,28 @@ always NPT.
 
 Large trajectory files (`.xtc`) are written to `SCRATCH_ROOT` and symlinked into `OUTDIR/trajectories/`. Copy them before scratch is purged.
 
-**Key point:** In GROMACS T-REMD, each replica runs at a **fixed temperature** and **coordinates** are exchanged between replicas. This means:
+Post-analysis runs automatically at the end of **both** engines' jobs — PBC fix, protein
+strip + backbone align, then RMSD / Rg / RMSF / DSSP and conformational clustering. T-REMD
+additionally computes replica-exchange acceptance rates. The same `scripts/analysis/` tools
+serve both engines (the analysis layer detects MD vs REMD automatically), and multi-chain
+complexes are handled by a dedicated path. See `scripts/analysis/README.md` for the full
+script reference.
 
-- `prod/rep000/remd.xtc` is the 300 K constant-temperature trajectory — use it directly for analysis.
+**T-REMD key point:** each replica runs at a **fixed temperature** and **coordinates** are
+exchanged between replicas, so:
+
+- `prod/rep000/remd.xtc` is the lowest-temperature constant-temperature trajectory — use it directly for analysis.
 - No demux step is needed.
 
-Post-analysis runs automatically at the end of each job. To re-run manually:
+To re-run analysis manually:
 ```bash
-python scripts/analysis/remd_acceptance.py    OUTDIR        # acceptance rates (target 20–30%)
-bash   scripts/analysis/fix_PBC_strip_align.sh OUTDIR 000   # PBC fix + strip + align
+# T-REMD:
+python scripts/analysis/remd_acceptance.py OUTDIR          # acceptance rates (target 20–30%)
+bash   scripts/analysis/run_analysis.sh    OUTDIR 000      # PBC fix + strip + align + metrics (rep000)
+
+# Plain MD:
+bash   scripts/analysis/run_analysis.sh    OUTDIR          # PBC fix + strip + align + metrics
 ```
-See `scripts/analysis/README.md` for the full script reference.
 
 ---
 
@@ -130,7 +178,7 @@ See `scripts/analysis/README.md` for the full script reference.
 | File | Who edits it | What it controls |
 |------|-------------|-----------------|
 | `site_config.sh` | Once per user/cluster | GROMACS path, scratch root, module names |
-| `my_job.sh` (copy of `submit_REMD.sh`) | Per job | PDB input, replicas, temperature range, simulation length |
+| `my_job.sh` (copy of `submit_REMD.sh` or `submit_MD.sh`) | Per job | PDB input, temperature(s), simulation length, ensemble (REMD: replicas + range) |
 | `#SBATCH` headers in engine script | Only if changing resource defaults | Partition, GPU type, memory, wall time |
 
 ---
@@ -145,12 +193,14 @@ gromacs_REMD/
 │   │   ├── REMD-gromacs.sbatch    # T-REMD engine
 │   │   ├── MD-gromacs.sbatch      # Plain-MD engine
 │   │   ├── config_example.sh      # Job config template (copy and edit)
-│   │   └── REMD-output-guide.md   # Full output file reference
+│   │   ├── REMD-output-guide.md   # T-REMD output file reference
+│   │   └── MD-output-guide.md     # Plain-MD output file reference
 │   ├── analysis/               # Post-processing tools (see scripts/analysis/README.md)
 │   └── installation/           # GROMACS + PLUMED build scripts
 ├── dev/                        # REST2 pipeline (in development)
 └── example/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/
-        └── submit_REMD.sh     # Submission wrapper (reads site_config.sh)
+        ├── submit_REMD.sh     # T-REMD submission wrapper (reads site_config.sh)
+        └── submit_MD.sh       # Plain-MD submission wrapper (reads site_config.sh)
 ```
