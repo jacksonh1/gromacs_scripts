@@ -26,7 +26,7 @@ set -euo pipefail
 
 CURRENT_TIME=$(date +%s)
 CURRENT_STEP=0
-PRESERVE_FROM_STEP=${PRESERVE_FROM_STEP:-9}
+PRESERVE_SCRATCH_FROM="${PRESERVE_SCRATCH_FROM:-prod}"   # prod | density | always | never (resolved to a step index in STEP 1)
 
 # ── Source optional config file ──────────────────────────────────────────────
 : "${GROMACS_SCRIPTS_DIR:?GROMACS_SCRIPTS_DIR is not set — submit via example/submit_jobs/submit_REMD.sh}"
@@ -87,7 +87,7 @@ REPLICAS=${SLURM_NTASKS:-${REPLICAS:-48}}
 # single rank before the replicas exist, so they may use the whole node: derive
 # the count from the full allocation (ntasks × cpus-per-task), capped at 8 to stay
 # in GROMACS' good OpenMP-scaling range and to never request more threads than
-# cores. Overridable via NTOMP_SERIAL. (The multi-replica NVT/production steps use
+# cores. Overridable via NTOMP_SERIAL. (The multi-replica equilibration/production steps use
 # one rank per replica with -ntomp 1 instead — see STEPS 7 and 9.)
 _NODE_CORES=$(( ${SLURM_NTASKS:-1} * ${SLURM_CPUS_PER_TASK:-1} ))
 NTOMP_SERIAL="${NTOMP_SERIAL:-$(( _NODE_CORES < 8 ? _NODE_CORES : 8 ))}"
@@ -103,19 +103,24 @@ REPLEX_PS="${REPLEX_PS:-0.5}"            # attempt exchange every this many ps
 TOTAL_NS="${TOTAL_NS:-20}"               # total production per replica (ns)
 
 # Equilibration
-EQUI_NS="${EQUI_NS:-0.2}"               # NVT equil length per replica (ns)
-NPT_SEG_STEPS="${NPT_SEG_STEPS:-10000}"
-NPT_MIN_SEG="${NPT_MIN_SEG:-8}"
-NPT_MAX_SEG="${NPT_MAX_SEG:-20}"
-NPT_TOL_REL="${NPT_TOL_REL:-0.005}"
+EQUIL_NS="${EQUIL_NS:-0.2}"               # per-replica equilibration length (ns)
+DENSITY_SEG_STEPS="${DENSITY_SEG_STEPS:-10000}"
+DENSITY_MIN_SEG="${DENSITY_MIN_SEG:-8}"
+DENSITY_MAX_SEG="${DENSITY_MAX_SEG:-20}"
+DENSITY_TOL_REL="${DENSITY_TOL_REL:-0.005}"
+
+# Ensemble for production + per-replica equilibration
+ENSEMBLE="${ENSEMBLE:-NVT}"              # NVT (constant volume) | NPT (C-rescale barostat)
+REF_P="${REF_P:-1.0}"                    # bar  (NPT only)
+TAU_P="${TAU_P:-1.0}"                    # ps   (NPT only)
 
 # Validate resolved parameters before deriving anything or building. Export the job
 # params so validate_params.py reads them from the environment (covers config- and
 # --export-set values alike). Keep this list in sync with validate_params.py.
 export PDB_IN OUTBASE OUTDIR FORCE FF WATER BOX_SHAPE BOX_BUFFER NEUTRALIZE \
        SALT_MOLAR REPLICAS NTOMP_SERIAL DT_PS T_MIN T_MAX CUTOFF_NM GAMMA_LN \
-       REPLEX_PS TOTAL_NS EQUI_NS NPT_SEG_STEPS NPT_MIN_SEG NPT_MAX_SEG \
-       NPT_TOL_REL CFG_REPLICAS
+       REPLEX_PS TOTAL_NS EQUIL_NS DENSITY_SEG_STEPS DENSITY_MIN_SEG DENSITY_MAX_SEG \
+       DENSITY_TOL_REL ENSEMBLE REF_P TAU_P PRESERVE_SCRATCH_FROM CFG_REPLICAS
 python3 "$VALIDATE_PARAMS" --engine remd
 
 # Derived step counts (after validation, so a non-numeric input fails with a clear
@@ -123,7 +128,32 @@ python3 "$VALIDATE_PARAMS" --engine remd
 TAU_T=$(python3 -c "print(f'{1.0/float(\"${GAMMA_LN}\"):.4f}')")
 REPLEX_STEPS=$(python3 -c "print(int(round(float('${REPLEX_PS}')/float('${DT_PS}'))))")
 PROD_NSTEPS=$(python3 -c "print(int(round(float('${TOTAL_NS}')*1000/float('${DT_PS}'))))")
-EQUI_NSTEPS=$(python3 -c "print(int(round(float('${EQUI_NS}')*1000/float('${DT_PS}'))))")
+EQUIL_NSTEPS=$(python3 -c "print(int(round(float('${EQUIL_NS}')*1000/float('${DT_PS}'))))")
+
+# Resolve the scratch-preservation stage name to this engine's step index (stage names
+# mean the same thing across MD/REMD; the index they map to is engine-specific). The
+# validator already restricted PRESERVE_SCRATCH_FROM to {prod,density,always,never}.
+case "$PRESERVE_SCRATCH_FROM" in
+  always)  PRESERVE_FROM_STEP=0 ;;
+  density) PRESERVE_FROM_STEP=5 ;;
+  prod)    PRESERVE_FROM_STEP=9 ;;
+  never)   PRESERVE_FROM_STEP=999 ;;
+  *) echo "[ERROR] invalid PRESERVE_SCRATCH_FROM='$PRESERVE_SCRATCH_FROM'"; exit 1 ;;
+esac
+
+# Pressure-coupling block injected into the per-replica equilibration (STEP 6) and
+# production (STEP 8) mdp. NPT uses C-rescale — robust + correct ensemble, matching the
+# density-equilibration barostat. GROMACS adds the PV term to the replica-exchange
+# Metropolis criterion automatically when pressure coupling is on, so -replex is unchanged.
+if [[ "$ENSEMBLE" == "NPT" ]]; then
+  PCOUPL_BLOCK="pcoupl      = C-rescale
+pcoupltype  = isotropic
+tau-p       = ${TAU_P}
+ref-p       = ${REF_P}
+compressibility = 4.5e-5"
+else
+  PCOUPL_BLOCK="pcoupl      = no"
+fi
 
 # Scratch — large trajectory files go here
 SCRATCH_TS="$(date +%Y%m%d-%H%M%S)"
@@ -154,7 +184,7 @@ if (( SCRATCH_AVAIL < 100 )); then
 fi
 
 # ── Output directory tree ────────────────────────────────────────────────────
-mkdir -p "${OUTDIR}"/{build,em,npt,nvt,prod,logs,trajectories} ./logs
+mkdir -p "${OUTDIR}"/{build,em,density,equil,prod,logs,trajectories} ./logs
 
 [[ -f "$PDB_IN" ]] || { echo "[ERROR] PDB not found: $PDB_IN"; exit 1; }
 echo "[OK] Parameters set  (${REPLICAS} replicas, ${T_MIN}–${T_MAX} K, ${TOTAL_NS} ns)"
@@ -306,12 +336,12 @@ echo "[OK] Minimization complete"
 CURRENT_STEP=5
 echo "===== STEP 5: NPT density equilibration (iterative) ====="
 
-NPT_DIR="${OUTDIR}/npt"
+DENSITY_DIR="${OUTDIR}/density"
 LAST_GRO="${EM_DIR}/em.gro"
 prev_vol=""
 seg=0
 
-while (( seg < NPT_MAX_SEG )); do
+while (( seg < DENSITY_MAX_SEG )); do
   seg=$((seg+1))
   echo "[INFO] NPT segment $seg"
 
@@ -321,15 +351,15 @@ while (( seg < NPT_MAX_SEG )); do
     CONT_FLAGS="gen-vel = yes
 gen-temp = ${T_MIN}"
     SEG_DT="0.001"
-    SEG_STEPS="${NPT_SEG_STEPS}"
+    SEG_STEPS="${DENSITY_SEG_STEPS}"
   else
     CONT_FLAGS="gen-vel = no
 continuation = yes"
     SEG_DT="${DT_PS}"
-    SEG_STEPS="${NPT_SEG_STEPS}"
+    SEG_STEPS="${DENSITY_SEG_STEPS}"
   fi
 
-  cat > "${NPT_DIR}/npt_seg${seg}.mdp" <<EOF
+  cat > "${DENSITY_DIR}/density_seg${seg}.mdp" <<EOF
 integrator  = md
 dt          = ${SEG_DT}
 nsteps      = ${SEG_STEPS}
@@ -366,29 +396,29 @@ define      = -DPOSRES
 EOF
 
   $GMX grompp \
-    -f "${NPT_DIR}/npt_seg${seg}.mdp" \
+    -f "${DENSITY_DIR}/density_seg${seg}.mdp" \
     -c "$LAST_GRO" \
     -r "$LAST_GRO" \
     -p "$SYS_TOP" \
-    -o "${NPT_DIR}/npt_seg${seg}.tpr" \
-    -po "${NPT_DIR}/mdout_npt${seg}.mdp" \
+    -o "${DENSITY_DIR}/density_seg${seg}.tpr" \
+    -po "${DENSITY_DIR}/mdout_density${seg}.mdp" \
     -maxwarn 5 \
-    > "${NPT_DIR}/grompp_npt${seg}.log" 2>&1
+    > "${DENSITY_DIR}/grompp_density${seg}.log" 2>&1
 
   $GMX mdrun \
-    -deffnm "${NPT_DIR}/npt_seg${seg}" \
-    -x "${SCRATCH_DIR}/${OUTBASE}_npt_seg${seg}.xtc" \
+    -deffnm "${DENSITY_DIR}/density_seg${seg}" \
+    -x "${SCRATCH_DIR}/${OUTBASE}_density_seg${seg}.xtc" \
     -ntomp "$NTOMP_SERIAL" -nb gpu -pme gpu -bonded gpu \
-    > "${NPT_DIR}/mdrun_npt${seg}.log" 2>&1
+    > "${DENSITY_DIR}/mdrun_density${seg}.log" 2>&1
 
   # Extract volume
   echo Volume | $GMX energy \
-    -f "${NPT_DIR}/npt_seg${seg}.edr" \
-    -o "${NPT_DIR}/volume_seg${seg}.xvg" \
+    -f "${DENSITY_DIR}/density_seg${seg}.edr" \
+    -o "${DENSITY_DIR}/volume_seg${seg}.xvg" \
     > /dev/null 2>&1
 
   vol_avg=$(awk '!/^[#@]/ {sum+=$2; n++} END {if(n>0) printf "%.6f", sum/n}' \
-            "${NPT_DIR}/volume_seg${seg}.xvg")
+            "${DENSITY_DIR}/volume_seg${seg}.xvg")
   echo "[INFO] Segment $seg average volume: ${vol_avg} nm^3"
 
   if [[ -n "$prev_vol" ]]; then
@@ -398,8 +428,8 @@ print(abs(curr-prev)/prev if prev!=0 else 1.0)
 ")
     echo "[INFO] Relative volume change: $rel_change"
 
-    if (( seg >= NPT_MIN_SEG )); then
-      converged=$(python3 -c "print(0 if float('$rel_change')>float('${NPT_TOL_REL}') else 1)")
+    if (( seg >= DENSITY_MIN_SEG )); then
+      converged=$(python3 -c "print(0 if float('$rel_change')>float('${DENSITY_TOL_REL}') else 1)")
       if (( converged )); then
         echo "[INFO] Density converged at segment $seg"
         break
@@ -408,36 +438,36 @@ print(abs(curr-prev)/prev if prev!=0 else 1.0)
   fi
 
   prev_vol="$vol_avg"
-  LAST_GRO="${NPT_DIR}/npt_seg${seg}.gro"
+  LAST_GRO="${DENSITY_DIR}/density_seg${seg}.gro"
 done
 
-if (( seg == NPT_MAX_SEG )); then
-  echo "[WARNING] Reached NPT_MAX_SEG=${NPT_MAX_SEG} without convergence; using last segment"
+if (( seg == DENSITY_MAX_SEG )); then
+  echo "[WARNING] Reached DENSITY_MAX_SEG=${DENSITY_MAX_SEG} without convergence; using last segment"
 fi
 
-NPT_GRO="${NPT_DIR}/npt_seg${seg}.gro"
-NPT_CPT="${NPT_DIR}/npt_seg${seg}.cpt"
-[[ -f "$NPT_GRO" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
+DENSITY_GRO="${DENSITY_DIR}/density_seg${seg}.gro"
+DENSITY_CPT="${DENSITY_DIR}/density_seg${seg}.cpt"
+[[ -f "$DENSITY_GRO" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
 echo "[OK] NPT density equilibration done"
 
 ###############################################################################
-# STEP 6 — Prepare per-replica NVT equilibration directories
+# STEP 6 — Prepare per-replica equilibration directories
 ###############################################################################
 CURRENT_STEP=6
-echo "===== STEP 6: Preparing per-replica NVT equilibration ====="
+echo "===== STEP 6: Preparing per-replica equilibration (${ENSEMBLE}) ====="
 
-NVT_DIR="${OUTDIR}/nvt"
+EQUIL_DIR="${OUTDIR}/equil"
 
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
   T=${TARR[$i]}
-  REPDIR="${NVT_DIR}/rep${idx}"
+  REPDIR="${EQUIL_DIR}/rep${idx}"
   mkdir -p "$REPDIR"
 
-  cat > "${REPDIR}/nvt.mdp" <<EOF
+  cat > "${REPDIR}/equil.mdp" <<EOF
 integrator  = md
 dt          = ${DT_PS}
-nsteps      = ${EQUI_NSTEPS}
+nsteps      = ${EQUIL_NSTEPS}
 nstxout-compressed = 2500
 nstlog      = 1000
 nstenergy   = 1000
@@ -455,7 +485,7 @@ tc-grps     = Protein Non-Protein
 tau-t       = ${TAU_T} ${TAU_T}
 ref-t       = ${T} ${T}
 
-pcoupl      = no
+${PCOUPL_BLOCK}
 
 constraints = h-bonds
 constraint-algorithm = LINCS
@@ -467,47 +497,47 @@ nstcomm     = 500
 EOF
 
   $GMX grompp \
-    -f "${REPDIR}/nvt.mdp" \
-    -c "$NPT_GRO" \
-    -r "$NPT_GRO" \
+    -f "${REPDIR}/equil.mdp" \
+    -c "$DENSITY_GRO" \
+    -r "$DENSITY_GRO" \
     -p "$SYS_TOP" \
-    -o "${REPDIR}/nvt.tpr" \
-    -po "${REPDIR}/mdout_nvt.mdp" \
+    -o "${REPDIR}/equil.tpr" \
+    -po "${REPDIR}/mdout_equil.mdp" \
     -maxwarn 5 \
     > "${REPDIR}/grompp.log" 2>&1
 
   # Pre-create symlink so deffnm writes the xtc directly to scratch
-  ln -sf "${SCRATCH_DIR}/nvt_rep${idx}.xtc" "${REPDIR}/nvt.xtc"
+  ln -sf "${SCRATCH_DIR}/equil_rep${idx}.xtc" "${REPDIR}/equil.xtc"
 done
-echo "[OK] NVT .tpr files prepared for all replicas"
+echo "[OK] equilibration .tpr files prepared for all replicas"
 
 ###############################################################################
-# STEP 7 — Run per-replica NVT equilibration
+# STEP 7 — Run per-replica equilibration
 ###############################################################################
 CURRENT_STEP=7
-echo "===== STEP 7: Running NVT equilibration ====="
+echo "===== STEP 7: Running per-replica equilibration ====="
 
 # Build the -multidir list
-MULTIDIR_NVT=""
+MULTIDIR_EQUIL=""
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
-  MULTIDIR_NVT+="${NVT_DIR}/rep${idx} "
+  MULTIDIR_EQUIL+="${EQUIL_DIR}/rep${idx} "
 done
 
 mpirun -np "$REPLICAS" "$GMX" mdrun \
-  -multidir $MULTIDIR_NVT \
-  -deffnm nvt \
+  -multidir $MULTIDIR_EQUIL \
+  -deffnm equil \
   -ntomp 1 \
   -nb gpu -pme gpu -bonded gpu \
   -pin on \
-  > "${OUTDIR}/logs/mdrun_nvt_equil.log" 2>&1
+  > "${OUTDIR}/logs/mdrun_equil.log" 2>&1
 
 # Verify all replicas finished
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
-  [[ -f "${NVT_DIR}/rep${idx}/nvt.gro" ]] || { echo "[ERROR] NVT equil failed for replica $idx"; exit 1; }
+  [[ -f "${EQUIL_DIR}/rep${idx}/equil.gro" ]] || { echo "[ERROR] equilibration failed for replica $idx"; exit 1; }
 done
-echo "[OK] NVT equilibration done"
+echo "[OK] per-replica equilibration done"
 
 ###############################################################################
 # STEP 8 — Prepare REMD production inputs
@@ -547,7 +577,7 @@ tc-grps     = Protein Non-Protein
 tau-t       = ${TAU_T} ${TAU_T}
 ref-t       = ${T} ${T}
 
-pcoupl      = no
+${PCOUPL_BLOCK}
 
 constraints = h-bonds
 constraint-algorithm = LINCS
@@ -560,8 +590,8 @@ EOF
 
   $GMX grompp \
     -f "${REPDIR}/remd.mdp" \
-    -c "${NVT_DIR}/rep${idx}/nvt.gro" \
-    -t "${NVT_DIR}/rep${idx}/nvt.cpt" \
+    -c "${EQUIL_DIR}/rep${idx}/equil.gro" \
+    -t "${EQUIL_DIR}/rep${idx}/equil.cpt" \
     -p "$SYS_TOP" \
     -o "${REPDIR}/remd.tpr" \
     -po "${REPDIR}/mdout_remd.mdp" \
@@ -598,7 +628,7 @@ mpirun -np "$REPLICAS" "$GMX" mdrun \
 # Verify every replica produced a final structure. A nonzero mpirun already aborts
 # via set -e + the ERR trap (which preserves scratch, since step 9 >= PRESERVE_FROM_STEP);
 # this additionally catches a silent partial failure where mdrun returns 0 but a
-# replica wrote no output. Mirrors the NVT-equilibration check in STEP 7.
+# replica wrote no output. Mirrors the per-replica equilibration check in STEP 7.
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
   [[ -f "${PROD_DIR}/rep${idx}/remd.gro" ]] || { echo "[ERROR] REMD production failed for replica $idx"; exit 1; }
@@ -614,7 +644,7 @@ echo "===== STEP 10: Finalizing outputs ====="
 # Symlink large trajectory files from scratch into the output tree
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
-  for prefix in nvt remd; do
+  for prefix in equil remd; do
     src="${SCRATCH_DIR}/${prefix}_rep${idx}.xtc"
     if [[ -f "$src" ]]; then
       ln -sf "$src" "${OUTDIR}/trajectories/${prefix}_rep${idx}.xtc"
@@ -623,7 +653,7 @@ for i in $(seq 0 $((REPLICAS-1))); do
 done
 
 # Symlink NPT trajectories from scratch
-for f in "${SCRATCH_DIR}/${OUTBASE}_npt_seg"*.xtc; do
+for f in "${SCRATCH_DIR}/${OUTBASE}_density_seg"*.xtc; do
   [[ -f "$f" ]] && ln -sf "$f" "${OUTDIR}/trajectories/$(basename "$f")"
 done
 
@@ -660,14 +690,16 @@ Salt molarity: $SALT_MOLAR
 Cutoff (nm): $CUTOFF_NM
 tau_t (ps): $TAU_T
 Time step (ps): $DT_PS
-Serial-step OMP threads (EM/NPT): $NTOMP_SERIAL
+Serial-step OMP threads (EM/density): $NTOMP_SERIAL
 Exchange interval (ps): $REPLEX_PS
 Exchange interval (steps): $REPLEX_STEPS
 Production steps: $PROD_NSTEPS
+Production ensemble: $ENSEMBLE$( [[ "$ENSEMBLE" == NPT ]] && echo " (C-rescale, ref-p ${REF_P} bar, tau-p ${TAU_P} ps)" )
+Per-replica equil ns: $EQUIL_NS
 Output directory: $OUTDIR
 Scratch directory: $SCRATCH_DIR
 GPUs: ${SLURM_GPUS_ON_NODE:-unknown}
-NPT convergence segments: $seg
+Density convergence segments: $seg
 EOF
 done
 

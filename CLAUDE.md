@@ -44,6 +44,19 @@ Each `prod/rep{i}/` directory is a **fixed temperature slot**, not a physical co
 - **No demux step is needed** to obtain the thermodynamic ensemble at a given temperature.
 - `gmx demux` follows a *configuration* as it walks through temperature space — useful for visualizing the random walk, but not for thermodynamic analysis.
 
+### Pipeline stage folders are named by role, not ensemble
+
+Output stages are named for what they *do*, so the name stays correct regardless of ensemble:
+
+- **MD:** `build/ → em/ → heat/ → density/ → [relax/] → prod/`
+- **REMD:** `build/ → em/ → density/ → equil/ → prod/`
+
+(`heat/` = NVT thermalization, MD-only; `density/` = iterative NPT density equilibration; `relax/` = optional unrestrained NPT, MD-only, `RELAX_NS>0`; `equil/` = per-replica equilibration, REMD-only.) Do **not** reintroduce ensemble-named folders (`nvt/`, `npt/`, `eq/`). Production basenames stay `md.*`/`remd.*` (method, not ensemble) — the analysis layer keys off them.
+
+### REMD ensemble toggle (`ENSEMBLE=NVT|NPT`)
+
+T-REMD production runs NVT (default, constant volume) or NPT (`ENSEMBLE=NPT`, C-rescale barostat at `REF_P` bar). Under NPT the per-replica `equil/` stage *and* production are pressure-coupled, and GROMACS adds the *PV* term to the replica-exchange Metropolis criterion automatically — `-replex` is unchanged. The constant-temperature ensemble interpretation above is unaffected. Plain MD production is always NPT.
+
 ---
 
 ## Working style
@@ -128,7 +141,7 @@ If the structure passed to `-s` has fewer atoms than the XTC (e.g. a protein-onl
 
 When a fully GPU-resident run (`-nb gpu -pme gpu -bonded gpu`, single rank → GPU-resident update) dies at step 0 with `CUDA error #700 (cudaErrorIllegalAddress)` — often surfacing as an assertion in `freeDeviceBuffer`/`cudaStreamQuery` — the GPU is rarely the real problem. A numerical explosion (overlapping atoms → NaN coordinates → out-of-bounds pairlist) manifests as an illegal memory access on the GPU instead of a clean error.
 
-**Fix:** re-run the *same tpr* with `-nb cpu`. The CPU path prints the real diagnosis — e.g. `Constraint error in algorithm Lincs at step 0` plus an energy table showing a huge **positive** `LJ (SR)` and absurd temperature/pressure (clashes). Then fix the physics (usually a bad starting structure), not the GPU flags. In one case the culprit was an NVT `grompp` reading the *un-minimized* `build/*_ions.gro` instead of `em/em.gro`, discarding EM and starting on clashing coordinates. Always confirm each equilibration `grompp -c` consumes the *previous* stage's output (em.gro → nvt.gro → npt.gro → prod), not the build.
+**Fix:** re-run the *same tpr* with `-nb cpu`. The CPU path prints the real diagnosis — e.g. `Constraint error in algorithm Lincs at step 0` plus an energy table showing a huge **positive** `LJ (SR)` and absurd temperature/pressure (clashes). Then fix the physics (usually a bad starting structure), not the GPU flags. In one case the culprit was the heat-stage `grompp` reading the *un-minimized* `build/*_ions.gro` instead of `em/em.gro`, discarding EM and starting on clashing coordinates. Always confirm each equilibration `grompp -c` consumes the *previous* stage's output (MD: em.gro → heat.gro → density_seg*.gro → [relax.gro] → prod; REMD: em.gro → density_seg*.gro → equil.gro → prod), not the build.
 
 ### Bash: `bash -n` does not catch `set -u` unbound variables — grep removed vars when refactoring
 
@@ -172,7 +185,7 @@ The matrix printed after the statistics block records one-step transition *proba
 
 ### GROMACS: this build provides only `gmx_mpi` — there is no `gmx` or `gmx mdrun`
 
-The install (`$HOME/opt/gromacs/2024.3-plumed/bin/`) ships a single binary, `gmx_mpi`. There is no plain `gmx`, so `gmx mdrun` does not exist. All commands — preprocessing *and* mdrun — must use `gmx_mpi`. An MPI-compiled GROMACS runs serial steps fine as a single rank with no `mpirun` (this is how the REMD engine runs EM/NPT); only multi-replica steps need `mpirun -np N`.
+The install (`$HOME/opt/gromacs/2024.3-plumed/bin/`) ships a single binary, `gmx_mpi`. There is no plain `gmx`, so `gmx mdrun` does not exist. All commands — preprocessing *and* mdrun — must use `gmx_mpi`. An MPI-compiled GROMACS runs serial steps fine as a single rank with no `mpirun` (this is how the REMD engine runs EM/density); only multi-replica steps need `mpirun -np N`.
 
 **Fix:** use the `GMX="${GMX:-gmx_mpi}"` pattern and call `$GMX mdrun` everywhere. (Both engines previously carried a dead `MDRUN="gmx mdrun"` variable that was never used and would fail here — it has been removed; don't reintroduce it.) The analysis scripts already probe `gmx_mpi` first, then fall back to `gmx`.
 

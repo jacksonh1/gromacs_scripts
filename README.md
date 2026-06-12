@@ -84,8 +84,8 @@ The engine script (`scripts/simulation/REMD-gromacs.sbatch`) runs 13 steps:
 | 3 | Build system: pdb2gmx → editconf → solvate → genion |
 | 4 | Energy minimization (steepest descent) |
 | 5 | NPT density equilibration (iterative, convergence-checked) |
-| 6 | Prepare per-replica NVT equilibration inputs |
-| 7 | Run NVT equilibration (all replicas in parallel via MPI) |
+| 6 | Prepare per-replica equilibration inputs (NVT, or NPT if `ENSEMBLE=NPT`) |
+| 7 | Run per-replica equilibration (all replicas in parallel via MPI) |
 | 8 | Prepare REMD production inputs |
 | 9 | Run T-REMD production |
 | 10 | Finalize outputs, create trajectory symlinks |
@@ -93,6 +93,17 @@ The engine script (`scripts/simulation/REMD-gromacs.sbatch`) runs 13 steps:
 | 12 | Post-analysis: acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
 
 See `scripts/simulation/REMD-output-guide.md` for a full description of all output files.
+
+### Production ensemble (`ENSEMBLE=NVT|NPT`)
+
+T-REMD production runs **NVT** by default (constant volume). Set `ENSEMBLE=NPT` in the
+submit script to pressure-couple production with a **C-rescale barostat** (at `REF_P` bar,
+default 1.0) — the correct ensemble for density-sensitive observables and bound-state
+sampling. Under `NPT` the per-replica `equil/` stage is also pressure-coupled, and GROMACS
+automatically adds the *PV* term to the replica-exchange Metropolis criterion (`-replex` is
+unchanged). The constant-temperature interpretation is unaffected either way:
+`prod/rep000/remd.xtc` is still the lowest-temperature ensemble. Plain MD production is
+always NPT.
 
 ---
 

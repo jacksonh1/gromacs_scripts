@@ -20,8 +20,8 @@ outputs/output_T-REMD-gromacs/DB2_unbound-5ns-REMD-300-450K-48reps-NVT/
 OUTDIR/
 ├── build/                        # Step 3 — System building
 ├── em/                           # Step 4 — Energy minimization
-├── npt/                          # Step 5 — NPT density equilibration
-├── nvt/                          # Steps 6–7 — Per-replica NVT equilibration
+├── density/                          # Step 5 — NPT density equilibration
+├── equil/                          # Steps 6–7 — Per-replica equilibration (NVT, or NPT if ENSEMBLE=NPT)
 │   ├── rep000/
 │   ├── rep001/
 │   └── ... (one per replica)
@@ -74,7 +74,7 @@ Relaxes clashes and strained geometry from system building. No dynamics — atom
 | `em.tpr` | Binary run input for EM |
 | `em.log` | GROMACS mdrun log (force convergence, potential energy) |
 | `em.edr` | Energy file (readable with `gmx energy`) |
-| `em.gro` | **Minimized structure** — input to NPT equilibration |
+| `em.gro` | **Minimized structure** — input to density equilibration |
 | `em.trr` | Full-precision trajectory (usually not needed) |
 | `mdrun_em.log` | mdrun stdout/stderr |
 
@@ -82,48 +82,50 @@ Relaxes clashes and strained geometry from system building. No dynamics — atom
 
 ---
 
-### `npt/` — NPT Density Equilibration (Step 5)
+### `density/` — NPT Density Equilibration (Step 5)
 
-Equilibrates system density at the lowest replica temperature (`T_MIN`) under constant pressure. Runs iteratively (up to `NPT_MAX_SEG` segments) until volume converges.
+Equilibrates system density at the lowest replica temperature (`T_MIN`) under constant pressure. Runs iteratively (up to `DENSITY_MAX_SEG` segments) until volume converges.
 
 | File | Description |
 |------|-------------|
-| `npt_seg<N>.mdp` | Parameters for segment N (V-rescale thermostat, C-rescale barostat) |
-| `grompp_npt<N>.log` | `grompp` log for segment N |
-| `npt_seg<N>.tpr` | Run input for segment N |
-| `npt_seg<N>.log` | GROMACS mdrun log |
-| `npt_seg<N>.edr` | Energy file — used to extract volume for convergence check |
-| `npt_seg<N>.gro` | Structure at end of segment N |
-| `npt_seg<N>.cpt` | Checkpoint file |
+| `density_seg<N>.mdp` | Parameters for segment N (V-rescale thermostat, C-rescale barostat) |
+| `grompp_density<N>.log` | `grompp` log for segment N |
+| `density_seg<N>.tpr` | Run input for segment N |
+| `density_seg<N>.log` | GROMACS mdrun log |
+| `density_seg<N>.edr` | Energy file — used to extract volume for convergence check |
+| `density_seg<N>.gro` | Structure at end of segment N |
+| `density_seg<N>.cpt` | Checkpoint file |
 | `volume_seg<N>.xvg` | Average volume extracted from the edr (convergence check) |
-| `mdrun_npt<N>.log` | mdrun stdout/stderr |
+| `mdrun_density<N>.log` | mdrun stdout/stderr |
 
 > Trajectories (`.xtc`) go to scratch (`SCRATCH_DIR`), not here.
-> The last converged `npt_seg<N>.gro` is used as the starting structure for all replicas.
+> The last converged `density_seg<N>.gro` is used as the starting structure for all replicas.
 
 ---
 
-### `nvt/rep<NNN>/` — Per-Replica NVT Equilibration (Steps 6–7)
+### `equil/rep<NNN>/` — Per-Replica Equilibration (Steps 6–7)
 
-Each replica equilibrates at its own target temperature with no pressure coupling. Velocities are freshly generated for each replica.
+Each replica equilibrates at its own target temperature. Velocities are freshly generated for each replica. Constant volume by default (`ENSEMBLE=NVT`); with `ENSEMBLE=NPT` this stage also runs the C-rescale barostat so each replica relaxes its box at its own temperature before production.
 
 | File | Description |
 |------|-------------|
-| `nvt.mdp` | NVT parameters with `ref-t` set to this replica's temperature |
+| `equil.mdp` | Equilibration parameters with `ref-t` set to this replica's temperature (NVT, or NPT C-rescale when `ENSEMBLE=NPT`) |
 | `grompp.log` | `grompp` log |
-| `nvt.tpr` | Run input |
-| `nvt.log` | GROMACS mdrun log |
-| `nvt.edr` | Energy file |
-| `nvt.gro` | **Equilibrated structure** at this replica's T — input to production |
-| `nvt.cpt` | Checkpoint — carries velocities forward into production |
+| `equil.tpr` | Run input |
+| `equil.log` | GROMACS mdrun log |
+| `equil.edr` | Energy file |
+| `equil.gro` | **Equilibrated structure** at this replica's T — input to production |
+| `equil.cpt` | Checkpoint — carries velocities forward into production |
 
-> `logs/mdrun_nvt_equil.log` contains the combined stdout from the MPI mdrun across all replicas.
+> `logs/mdrun_equil.log` contains the combined stdout from the MPI mdrun across all replicas.
 
 ---
 
 ### `prod/rep<NNN>/` — REMD Production (Steps 8–9)
 
 The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate exchanges every `REPLEX_PS` ps.
+
+**Ensemble (`ENSEMBLE`, default `NVT`):** production runs at constant volume (`NVT`) or constant pressure (`NPT`, C-rescale barostat at `REF_P` bar). The constant-temperature interpretation is unchanged either way — `rep000/remd.xtc` is the `T_MIN` ensemble. Under `NPT`, GROMACS automatically adds the *PV* term to the replica-exchange criterion (no `-replex` change), and the per-replica `equil/` stage also runs NPT so each replica's box is pre-relaxed.
 
 | File | Description |
 |------|-------------|
@@ -144,7 +146,7 @@ The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate
 
 | File | Description |
 |------|-------------|
-| `mdrun_nvt_equil.log` | Combined stdout from all-replica NVT mdrun |
+| `mdrun_equil.log` | Combined stdout from all-replica equilibration mdrun |
 | `mdrun_remd.log` | Combined stdout from REMD production mdrun |
 
 ---
@@ -152,9 +154,9 @@ The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate
 ### `trajectories/`
 
 Symlinks pointing to the actual trajectory files on scratch (`SCRATCH_DIR`). Named:
-- `nvt_rep<NNN>.xtc` — NVT equilibration trajectory per replica
+- `equil_rep<NNN>.xtc` — per-replica equilibration trajectory
 - `remd_rep<NNN>.xtc` — production trajectory per replica
-- `<OUTBASE>_npt_seg<N>.xtc` — NPT equilibration trajectories
+- `<OUTBASE>_density_seg<N>.xtc` — density equilibration trajectories
 
 > These files live in `/orcd/data/keating/001/<user>/MD/<jobid>_<timestamp>/`. Copy them before the scratch is purged.
 
@@ -171,7 +173,7 @@ A plain-text record of all simulation parameters (force field, temperatures, tim
 | Goal | File(s) |
 |------|---------|
 | Check EM converged | `em/em.log` — look for `Fmax <` line |
-| Check density equilibration | `npt/volume_seg*.xvg` |
+| Check density equilibration | `density/volume_seg*.xvg` |
 | Check REMD exchange rates | `python scripts/analysis/remd_acceptance.py OUTDIR` — outputs table + CSV |
 | Analyze lowest-T ensemble | `analysis/remd_rep000_stripped_aligned.xtc` (protein-only, aligned) + `analysis/remd_rep000_stripped_aligned.gro` |
 | RMSD / Rg / RMSF / DSSP | `analysis/remd_rep000_{rmsd,rg,rmsf,dssp}.*` |

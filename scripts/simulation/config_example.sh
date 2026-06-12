@@ -34,17 +34,20 @@ T_MAX=400
 # ── Production ───────────────────────────────────────────────────────────────
 TOTAL_NS=20                           # ns per replica
 REPLEX_PS="0.5"                       # exchange attempt interval (ps)
+# ENSEMBLE=NVT                        # NVT (constant volume) | NPT (C-rescale barostat)
+# REF_P="1.0"                         # bar (NPT only)
+# TAU_P="1.0"                         # ps  (NPT only)
 
 # ── Equilibration ────────────────────────────────────────────────────────────
-# EQUI_NS="0.2"                       # NVT equil per replica (ns)
-# NPT_SEG_STEPS=10000                 # steps per NPT density segment
-# NPT_MIN_SEG=8                       # min segments before convergence check
-# NPT_MAX_SEG=20
-# NPT_TOL_REL="0.005"                 # relative volume change tolerance
+# EQUIL_NS="0.2"                      # per-replica equilibration (ns)
+# DENSITY_SEG_STEPS=10000             # steps per density-equilibration segment
+# DENSITY_MIN_SEG=8                   # min segments before convergence check
+# DENSITY_MAX_SEG=20
+# DENSITY_TOL_REL="0.005"             # relative volume change tolerance
 
 # ── Scratch ──────────────────────────────────────────────────────────────────
 # SCRATCH_DIR="/path/to/fast/storage/${SLURM_JOB_ID}"
-# PRESERVE_FROM_STEP=9                # preserve scratch on failure from this step
+# PRESERVE_SCRATCH_FROM=prod          # prod|density|always|never — keep scratch on failure from this stage
 
 # ── GROMACS binary ───────────────────────────────────────────────────────────
 # GMX="gmx_mpi"                       # this build provides gmx_mpi only; leave unset

@@ -31,11 +31,15 @@ import sys
 _SHARED_JOB = {
     "PDB_IN", "OUTBASE", "OUTDIR", "FF", "WATER", "BOX_SHAPE", "BOX_BUFFER",
     "NEUTRALIZE", "SALT_MOLAR", "DT_PS", "CUTOFF_NM", "GAMMA_LN", "TOTAL_NS",
-    "EQUI_NS", "NPT_SEG_STEPS", "NPT_MIN_SEG", "NPT_MAX_SEG", "NPT_TOL_REL",
-    "PRESERVE_FROM_STEP", "SCRATCH_DIR", "SCRATCH_ROOT", "GMX",
+    "DENSITY_SEG_STEPS", "DENSITY_MIN_SEG", "DENSITY_MAX_SEG", "DENSITY_TOL_REL",
+    "PRESERVE_SCRATCH_FROM", "SCRATCH_DIR", "SCRATCH_ROOT", "GMX",
 }
-_REMD_JOB = {"FORCE", "REPLICAS", "NTOMP_SERIAL", "T_MIN", "T_MAX", "TEMPS_LIST", "REPLEX_PS"}
-_MD_JOB = {"T_SIM", "TRAJ_PS", "EQ_NPT_NS", "NTOMP"}
+# EQUIL_NS (REMD per-replica equil) and HEAT_NS (MD NVT heat) are NOT shared: the same
+# clock means a different stage per engine, so each engine names its own (see CLAUDE.md
+# cross-engine audit). Likewise EQ_NPT_NS → RELAX_NS is MD-only.
+_REMD_JOB = {"FORCE", "REPLICAS", "NTOMP_SERIAL", "T_MIN", "T_MAX", "TEMPS_LIST", "REPLEX_PS",
+             "EQUIL_NS", "ENSEMBLE", "REF_P", "TAU_P"}
+_MD_JOB = {"T_SIM", "TRAJ_PS", "HEAT_NS", "RELAX_NS", "NTOMP"}
 
 # site_config.sh settings a job config may legitimately override (so they are not
 # flagged as typos), even though they are normally set once per cluster.
@@ -110,14 +114,18 @@ def validate_values(engine):
         errs.append(f"[ERROR] PDB_IN file not found: {pdb}")
 
     # ── shared numeric ──
-    for name in ("DT_PS", "CUTOFF_NM", "GAMMA_LN", "BOX_BUFFER", "TOTAL_NS", "NPT_TOL_REL"):
+    for name in ("DT_PS", "CUTOFF_NM", "GAMMA_LN", "BOX_BUFFER", "TOTAL_NS", "DENSITY_TOL_REL"):
         positive(name)
-    positive("EQUI_NS", allow_zero=True)
-    nmin = positive("NPT_MIN_SEG", integer=True)
-    nmax = positive("NPT_MAX_SEG", integer=True)
-    positive("NPT_SEG_STEPS", integer=True)
+    nmin = positive("DENSITY_MIN_SEG", integer=True)
+    nmax = positive("DENSITY_MAX_SEG", integer=True)
+    positive("DENSITY_SEG_STEPS", integer=True)
     if nmin is not None and nmax is not None and nmin > nmax:
-        errs.append(f"[ERROR] NPT_MIN_SEG ({nmin}) must be <= NPT_MAX_SEG ({nmax})")
+        errs.append(f"[ERROR] DENSITY_MIN_SEG ({nmin}) must be <= DENSITY_MAX_SEG ({nmax})")
+    # Stage name (not an engine-relative step index): valid values are stages present in
+    # BOTH engines, so the meaning is portable across MD and REMD.
+    psf = env.get("PRESERVE_SCRATCH_FROM", "")
+    if psf not in ("", "prod", "density", "always", "never"):
+        errs.append(f"[ERROR] PRESERVE_SCRATCH_FROM must be one of prod|density|always|never (got '{psf}')")
     salt = env.get("SALT_MOLAR", "")
     if salt != "":
         v = as_num("SALT_MOLAR", salt, integer=False)
@@ -129,6 +137,12 @@ def validate_values(engine):
     if engine == "remd":
         flag01("FORCE")
         positive("REPLEX_PS")
+        positive("EQUIL_NS", allow_zero=True)
+        ens = env.get("ENSEMBLE", "")
+        if ens not in ("", "NVT", "NPT"):
+            errs.append(f"[ERROR] ENSEMBLE must be NVT or NPT (got '{ens}')")
+        positive("REF_P")
+        positive("TAU_P")
         tmin = positive("T_MIN")
         tmax = positive("T_MAX")
         if tmin is not None and tmax is not None and tmax <= tmin:
@@ -148,7 +162,8 @@ def validate_values(engine):
     else:  # md
         positive("T_SIM")
         positive("TRAJ_PS")
-        positive("EQ_NPT_NS", allow_zero=True)
+        positive("HEAT_NS", allow_zero=True)
+        positive("RELAX_NS", allow_zero=True)
         nt = positive("NTOMP", integer=True)
         if nt is not None and nt < 1:
             errs.append(f"[ERROR] NTOMP must be >= 1 (got {nt})")
