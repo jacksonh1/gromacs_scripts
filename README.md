@@ -1,6 +1,15 @@
-# GROMACS Structure-Characterization Pipelines - UNSTABLE
+# GROMACS Structure-Characterization Pipelines - mostly stable
 
 # warning - This pipeline is under active development
+
+
+# upcoming features (not yet implemented):
+
+- REST2 enhanced sampling
+- refactoring of the analysis layer to a python package
+- implicit solvent support (currently only explicit water)
+- adjustable force-field support (currently only AMBER99SB-ILDN)
+
 
 
 GROMACS 2024.3 pipelines for characterizing **folded protein structures** on single-node GPU clusters (SLURM). The input can be any folded pose — a de novo design, a crystal/cryo-EM structure, a predicted model, or a mutant variant. Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.

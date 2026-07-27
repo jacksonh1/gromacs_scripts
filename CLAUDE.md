@@ -209,3 +209,9 @@ Things to keep straight when touching parameters:
 - **Derived step counts** (`*_NSTEPS`, `TAU_T`, `REPLEX_STEPS`) are computed **after** the validator on purpose, so a non-numeric input fails with a clear message instead of a raw traceback from the inline `python3 -c`. Keep new derivations below the validate call.
 - **Typo'd-key detection is config-file only.** Under `--export=ALL` the job inherits the whole shell environment, so there's no clean manifest to flag an unknown `--export` key against — only value/required/range checks cover that path (by design).
 
+### GROMACS: short `REPLEX_PS` (<1 ps) deadlocks GPU-resident REMD — keep it ≥ 1 ps
+
+On GPU-resident REMD production (`-nb/-pme/-bonded gpu`, GPU update, many ranks/GPU — e.g. 48 ranks on 4 L40S), `REPLEX_PS=0.5` (exchange every 250 steps @ 2 fs) reliably **hangs mid-run**: CPUs at 100%, GPUs at 0%, indefinitely. Signature: *all* replicas frozen at the *same* exchange step with **clean physics** (`Constr. rmsd = 0`, no LINCS/NaN) — an **MPI collective deadlock at exchange**, not a blow-up (contrast the CUDA #700 gotcha). Cause: each accepted swap moves GPU-resident coordinates via GPU↔CPU transfers + stream syncs; at 250-step spacing consecutive swaps' stream work overlaps and races. It's a **threshold, not linear**: the *same* config at `REPLEX_PS=1.0` never hangs — interval was the only change.
+
+**Fix:** keep **`REPLEX_PS ≥ 1.0`** (1–2 ps is standard and sub-ps buys no extra sampling). Only if sub-ps exchange were truly required, add **`-update cpu`** to the STEP 9 `mdrun` (moves the swap off the GPU) at ~10–25% throughput cost. `config_example.sh` ships `0.5` — raise it.
+
