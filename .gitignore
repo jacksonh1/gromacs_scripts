@@ -1,6 +1,7 @@
 example/outputs/
 
-
+# software
+*.tar.gz
 
 # GROMACS binary/trajectory output
 *.xtc

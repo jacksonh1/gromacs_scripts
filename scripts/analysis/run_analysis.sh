@@ -68,9 +68,16 @@ elif [[ -f "${OUTDIR}/prod/rep${REP}/remd.tpr" ]]; then
   TPR="${OUTDIR}/prod/rep${REP}/remd.tpr"
   XTC="${OUTDIR}/trajectories/remd_rep${REP}.xtc"
   PREFIX="${ANALYSIS_DIR}/remd_rep${REP}"
+elif [[ -f "${OUTDIR}/prod/rep${REP}/rest2.tpr" ]]; then
+  # REST2: rep000 is lambda=1 = the physical T_MIN ensemble. Analysis is identical
+  # to REMD's slot analysis (rep000 is the ensemble of interest); only the basename differs.
+  MODE="REST2"
+  TPR="${OUTDIR}/prod/rep${REP}/rest2.tpr"
+  XTC="${OUTDIR}/trajectories/rest2_rep${REP}.xtc"
+  PREFIX="${ANALYSIS_DIR}/rest2_rep${REP}"
 else
-  echo "[ERROR] Cannot find prod/md.tpr or prod/rep${REP}/remd.tpr under $OUTDIR"
-  echo "        Is this a finished MD or T-REMD job directory?"
+  echo "[ERROR] Cannot find prod/md.tpr, prod/rep${REP}/remd.tpr, or prod/rep${REP}/rest2.tpr under $OUTDIR"
+  echo "        Is this a finished MD, T-REMD, or REST2 job directory?"
   exit 1
 fi
 
@@ -86,8 +93,9 @@ echo "[INFO] PREFIX : $PREFIX"
 # -e follows the symlink: trajectories/ are symlinks into scratch, which is purged.
 [[ -e "$XTC" ]]  || { echo "[ERROR] Trajectory not found (scratch purged?): $XTC"; exit 1; }
 
-# ── REMD-only: exchange acceptance rates ──────────────────────────────────────
-if [[ "$MODE" == "REMD" ]]; then
+# ── REMD/REST2-only: exchange acceptance rates ────────────────────────────────
+# (remd_acceptance.py auto-detects the remd.log vs rest2.log basename.)
+if [[ "$MODE" == "REMD" || "$MODE" == "REST2" ]]; then
   echo "[CMD] python3 ${SCRIPT_DIR}/remd_acceptance.py $OUTDIR"
   python3 "${SCRIPT_DIR}/remd_acceptance.py" "$OUTDIR" \
     || echo "[WARN] remd_acceptance.py failed — re-run the command above"

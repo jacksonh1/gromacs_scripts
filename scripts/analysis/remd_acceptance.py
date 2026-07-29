@@ -77,10 +77,20 @@ def parse_stats_block(log_text):
     }
 
 
-def get_temperatures(outdir, n_replicas):
+def prod_basename(outdir):
+    """Production log basename: 'remd' for T-REMD, 'rest2' for REST2 (same log format
+    and exchange-statistics block; REST2 replicas all report the same physical
+    temperature, so the per-pair acceptance rates are the meaningful output)."""
+    for base in ('remd', 'rest2'):
+        if (Path(outdir) / 'prod' / 'rep000' / f'{base}.log').exists():
+            return base
+    sys.exit(f"[ERROR] no prod/rep000/{{remd,rest2}}.log under {outdir}")
+
+
+def get_temperatures(outdir, n_replicas, basename):
     temps = []
     for i in range(n_replicas):
-        log_path = Path(outdir) / 'prod' / f'rep{i:03d}' / 'remd.log'
+        log_path = Path(outdir) / 'prod' / f'rep{i:03d}' / f'{basename}.log'
         if not log_path.exists():
             sys.exit(f"[ERROR] Replica log not found: {log_path}")
         # Temperature appears in the mdp parameters section near the top of the log.
@@ -200,7 +210,8 @@ def main():
     )
     args = ap.parse_args()
 
-    log_path = Path(args.outdir) / 'prod' / f'rep{args.rep}' / 'remd.log'
+    basename = prod_basename(args.outdir)
+    log_path = Path(args.outdir) / 'prod' / f'rep{args.rep}' / f'{basename}.log'
     if not log_path.exists():
         sys.exit(f"[ERROR] Log not found: {log_path}")
 
@@ -211,7 +222,7 @@ def main():
     stats['n_replicas']     = header['n_replicas']
     stats['replex_interval'] = header['replex_interval']
 
-    temps = get_temperatures(args.outdir, header['n_replicas'])
+    temps = get_temperatures(args.outdir, header['n_replicas'], basename)
     report(stats, temps, args.outdir, args.plot)
 
 

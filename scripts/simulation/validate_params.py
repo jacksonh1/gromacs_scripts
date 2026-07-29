@@ -40,16 +40,21 @@ _SHARED_JOB = {
 _REMD_JOB = {"FORCE", "REPLICAS", "NTOMP_SERIAL", "T_MIN", "T_MAX", "TEMPS_LIST", "REPLEX_PS",
              "EQUIL_NS", "ENSEMBLE", "REF_P", "TAU_P"}
 _MD_JOB = {"T_SIM", "TRAJ_PS", "HEAT_NS", "RELAX_NS", "NTOMP"}
+# REST2 uses the same job params as REMD (T_MAX = EFFECTIVE max solute temp, but the
+# type/range checks are identical: > 0, T_MAX > T_MIN, REPLICAS >= 2, …).
+_REST2_JOB = _REMD_JOB
 
 # site_config.sh settings a job config may legitimately override (so they are not
 # flagged as typos), even though they are normally set once per cluster.
 _SITE_OVERRIDES = {
     "GMXRC", "PLUMED_SH", "CUDA_MODULE", "OPENMPI_MODULE", "CONDA_MODULE",
     "GROMD_ENV", "GROMACS_SCRIPTS_DIR",
+    "REST2_GMXRC", "REST2_CUDA_MODULE", "HCOLL_COMPAT_DIR",   # REST2-specific site settings
 }
 
 ALLOWED = {
     "remd": _SHARED_JOB | _REMD_JOB | _SITE_OVERRIDES,
+    "rest2": _SHARED_JOB | _REST2_JOB | _SITE_OVERRIDES,
     "md": _SHARED_JOB | _MD_JOB | _SITE_OVERRIDES,
 }
 
@@ -134,7 +139,9 @@ def validate_values(engine):
     flag01("NEUTRALIZE")
 
     # ── engine-specific ──
-    if engine == "remd":
+    # REST2 shares REMD's parameter set and checks (T_MAX is the EFFECTIVE max solute
+    # temperature but validated identically: > 0 and > T_MIN).
+    if engine in ("remd", "rest2"):
         flag01("FORCE")
         positive("REPLEX_PS")
         positive("EQUIL_NS", allow_zero=True)
@@ -173,7 +180,7 @@ def validate_values(engine):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", required=True, choices=["remd", "md"])
+    ap.add_argument("--engine", required=True, choices=["remd", "rest2", "md"])
     ap.add_argument("--check-keys", metavar="CONFIG",
                     help="validate the assignment keys in this config file instead of env values")
     args = ap.parse_args()

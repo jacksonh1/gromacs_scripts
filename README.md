@@ -1,18 +1,23 @@
 # GROMACS Structure-Characterization Pipelines - mostly stable
 
-## upcoming features (not yet implemented):
+# warning - This pipeline is under active development
 
-- REST2 enhanced sampling
+
+# upcoming features (not yet implemented):
+
 - refactoring of the analysis layer to a python package
 - implicit solvent support (currently only explicit water)
 - adjustable force-field support (currently only AMBER99SB-ILDN)
 
-# warning - This pipeline is under active development
+
 
 GROMACS 2024.3 pipelines for characterizing **folded protein structures** on single-node GPU clusters (SLURM). The input can be any folded pose — a de novo design, a crystal/cryo-EM structure, a predicted model, or a mutant variant. Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
 
-Two engines are provided:
+Three engines are provided:
 - **T-REMD** (`submit_REMD.sh`) — temperature replica-exchange enhanced sampling
+- **REST2** (`submit_REST2.sh`) — replica exchange with solute tempering (PLUMED Hamiltonian
+  replica exchange): all replicas at one physical temperature, only the protein's force field
+  scaled across an effective-temperature ladder. Fewer replicas than T-REMD for the same range.
 - **Plain production MD** (`submit_MD.sh`) — single-temperature NPT production
 
 ## Purpose
@@ -34,7 +39,7 @@ Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for *
 - A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `scripts/installation/environment.yml` — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
 - SLURM with GPU access
 
-A PLUMED 2.9.4-patched build is recommended — it runs all T-REMD tasks identically to a plain build and additionally enables the REST2 pipeline (`dev/`). A plain build works for T-REMD only.
+T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GROMACS 2023.5 + PLUMED build** — the PLUMED hrex patch is broken on GROMACS 2024 (runs but silently gives zero exchanges), so REST2 uses its own build (`REST2_GMXRC` in `site_config.sh`; recipe in `scripts/installation/install_gromacs-2023.5-plumed.sh`). See `CLAUDE.md`.
 
 ---
 
@@ -203,7 +208,6 @@ gromacs_REMD/
 │   │   └── MD-output-guide.md     # Plain-MD output file reference
 │   ├── analysis/               # Post-processing tools (see scripts/analysis/README.md)
 │   └── installation/           # GROMACS + PLUMED build scripts
-├── dev/                        # REST2 pipeline (in development)
 └── example/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/

@@ -7,15 +7,28 @@
 # set in each submit script. You never need to touch it again after setup.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── GROMACS installation ──────────────────────────────────────────────────────
-# Point this at your GROMACS bin/GMXRC. A PLUMED-patched build works for all
-# standard T-REMD tasks and additionally enables the REST2 pipeline. A plain
-# build works for T-REMD only (REST2 will fail with a clear error).
+# ── GROMACS installation (T-REMD / plain MD) ──────────────────────────────────
+# Point this at the GROMACS bin/GMXRC used by REMD-gromacs.sbatch and MD-gromacs.sbatch.
 GMXRC="${GMXRC:-$HOME/opt/gromacs/2024.3-plumed/bin/GMXRC}"
 
-# Script that activates the PLUMED kernel (sets PLUMED_KERNEL, LD_LIBRARY_PATH).
-# Only needed for REST2; ignored by the T-REMD pipeline.
+# ── REST2 (PLUMED Hamiltonian replica exchange) ───────────────────────────────
+# REST2 needs a GROMACS build with WORKING PLUMED hrex. IMPORTANT: the 2024.3-plumed
+# build above does NOT work for hrex — it runs but silently gives ZERO exchanges
+# (hrex was never ported to the GROMACS-2024 PLUMED patch; see CLAUDE.md). REST2 uses
+# a dedicated GROMACS 2023.5 build instead (scripts/installation/install_gromacs-2023.5-plumed.sh).
+REST2_GMXRC="${REST2_GMXRC:-$HOME/opt/gromacs/2023.5-plumed/bin/GMXRC}"
+# CUDA matching that build (2023.5 predates cuda 12.9; use 12.4 via deprecated-modules).
+REST2_CUDA_MODULE="${REST2_CUDA_MODULE:-cuda/12.4.0}"
+
+# Script that activates the PLUMED kernel (sets PLUMED_KERNEL, LD_LIBRARY_PATH). REST2 only.
 PLUMED_SH="${PLUMED_SH:-$HOME/plumed.sh}"
+
+# hcoll/ocoms compat libs. `gmx_mpi` AND the `plumed` CLI link libhcoll.so.1 / libocoms.so.0,
+# which some GPU compute nodes lack under /opt/mellanox. The REST2 engine prepends this dir
+# to LD_LIBRARY_PATH so both run everywhere (harmless no-op on nodes that already have them).
+# Populate once:  mkdir -p ~/opt/hcoll_compat && cp -a /opt/mellanox/hcoll/lib/libhcoll.so.1* \
+#                    /opt/mellanox/hcoll/lib/libocoms.so.0* ~/opt/hcoll_compat/   (from a node that HAS them)
+HCOLL_COMPAT_DIR="${HCOLL_COMPAT_DIR:-$HOME/opt/hcoll_compat}"
 
 # ── Scratch storage ───────────────────────────────────────────────────────────
 # Root directory for large trajectory files. Each job creates a timestamped
