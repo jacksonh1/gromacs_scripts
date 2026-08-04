@@ -61,19 +61,19 @@ EM_TPR="${OUTDIR}/em/em.tpr"
 if [[ -f "${OUTDIR}/prod/md.tpr" ]]; then
   MODE="MD"
   TPR="${OUTDIR}/prod/md.tpr"
-  XTC="${OUTDIR}/trajectories/md.xtc"
+  XTC="${OUTDIR}/prod/md.xtc"
   PREFIX="${ANALYSIS_DIR}/md"
 elif [[ -f "${OUTDIR}/prod/rep${REP}/remd.tpr" ]]; then
   MODE="REMD"
   TPR="${OUTDIR}/prod/rep${REP}/remd.tpr"
-  XTC="${OUTDIR}/trajectories/remd_rep${REP}.xtc"
+  XTC="${OUTDIR}/prod/rep${REP}/remd.xtc"
   PREFIX="${ANALYSIS_DIR}/remd_rep${REP}"
 elif [[ -f "${OUTDIR}/prod/rep${REP}/rest2.tpr" ]]; then
   # REST2: rep000 is lambda=1 = the physical T_MIN ensemble. Analysis is identical
   # to REMD's slot analysis (rep000 is the ensemble of interest); only the basename differs.
   MODE="REST2"
   TPR="${OUTDIR}/prod/rep${REP}/rest2.tpr"
-  XTC="${OUTDIR}/trajectories/rest2_rep${REP}.xtc"
+  XTC="${OUTDIR}/prod/rep${REP}/rest2.xtc"
   PREFIX="${ANALYSIS_DIR}/rest2_rep${REP}"
 else
   echo "[ERROR] Cannot find prod/md.tpr, prod/rep${REP}/remd.tpr, or prod/rep${REP}/rest2.tpr under $OUTDIR"
@@ -90,7 +90,9 @@ echo "[INFO] XTC    : $XTC"
 echo "[INFO] PREFIX : $PREFIX"
 
 [[ -f "$TPR" ]]  || { echo "[ERROR] Run input not found: $TPR"; exit 1; }
-# -e follows the symlink: trajectories/ are symlinks into scratch, which is purged.
+# -e follows symlinks: under the folder-symlink model prod/ is a symlink into scratch
+# (SYMLINK_BULK=1), so the .xtc resolves through it; -e also works when prod/ is a real
+# dir (SYMLINK_BULK=0). A missing file means scratch was purged.
 [[ -e "$XTC" ]]  || { echo "[ERROR] Trajectory not found (scratch purged?): $XTC"; exit 1; }
 
 # ── REMD/REST2-only: exchange acceptance rates ────────────────────────────────

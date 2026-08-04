@@ -14,6 +14,13 @@ TOTAL_NS=2
 REPLEX_PS=1
 ENSEMBLE=NPT     # NVT (constant volume) | NPT (C-rescale pressure coupling)
 
+# === Reproducibility ===
+# -1 (default) = fresh random seed each run (each run an independent sample).
+# Set to a non-negative integer to pin the RNG (velocity generation, V-rescale/C-rescale
+# streams, replica exchange; per-replica seed = SEED+i). NOTE: on GPU this fixes the
+# initial conditions and RNG streams, not a bit-for-bit identical trajectory.
+SEED=-1
+
 # === System ===
 PDB_IN="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/input_pdbs/helix_fusion.pdb"
 
@@ -22,5 +29,5 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 
 sbatch -n "$REPLICAS" \
-  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE" \
+  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE",SEED="$SEED" \
   "${GROMACS_SCRIPTS_DIR}/REMD-gromacs.sbatch"

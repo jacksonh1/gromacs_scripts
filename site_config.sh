@@ -17,6 +17,15 @@ GMXRC="${GMXRC:-$HOME/opt/gromacs/2024.3-plumed/bin/GMXRC}"
 # (hrex was never ported to the GROMACS-2024 PLUMED patch; see CLAUDE.md). REST2 uses
 # a dedicated GROMACS 2023.5 build instead (scripts/installation/install_gromacs-2023.5-plumed.sh).
 REST2_GMXRC="${REST2_GMXRC:-$HOME/opt/gromacs/2023.5-plumed/bin/GMXRC}"
+
+# ── Custom force fields (GMXLIB) ──────────────────────────────────────────────
+# Extra directory GROMACS searches for <name>.ff force-field dirs, IN ADDITION to
+# each build's bundled share/gromacs/top (so amber99sb-ildn etc. keep working).
+# This is how FF=charmm36m is found — the CHARMM36m GROMACS port lives here as
+# charmm36m.ff (installed from the MacKerell force-switch port; -water tip3p then
+# resolves to the CHARMM-modified TIP3P inside that dir). Covers both builds above.
+# GMXRC does not set GMXLIB, so exporting it here survives sourcing GMXRC.
+export GMXLIB="$HOME/opt/gromacs/ff${GMXLIB:+:$GMXLIB}"
 # CUDA matching that build (2023.5 predates cuda 12.9; use 12.4 via deprecated-modules).
 REST2_CUDA_MODULE="${REST2_CUDA_MODULE:-cuda/12.4.0}"
 

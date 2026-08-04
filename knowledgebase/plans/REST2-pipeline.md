@@ -96,12 +96,12 @@ Constraints baked in:
   `-hrex` runs cleanly with the **default GPU-resident update** — 4/4 replicas finished
   in 8 s, no hang; `-update cpu` also works. **So GPU-resident is fine; `-update cpu`
   is NOT required.** The `Replica exchange statistics` block is written and parseable.
-  - **Caveat — sampling NOT yet validated:** acceptance was 0 exchanges / ~0.00 prob
-    across all 3 pairs (19 attempts). Plausible for this deliberately-coarse config
-    (4 reps, 300→400 K effective, 433-atom whole-protein solute, 20 ps, identical
-    start coords → large ΔE → near-zero Metropolis P), and the exchange machinery
-    demonstrably ran — but it does **not** prove correct acceptance. Needs a finer
-    ladder / longer run showing nonzero acceptance before trusting sampling.
+  - **Caveat — sampling NOT yet validated (RESOLVED 2026-07-29, see below):** at the
+    time of this entry acceptance was 0 exchanges / ~0.00 prob across all 3 pairs (19
+    attempts) — but that was on the silently-broken 2024.3 build. On the fixed GROMACS
+    2023.5 + PLUMED 2.9.4 build acceptance is 0.65–0.82 on a fine ladder (and P=1.0 on
+    the identical-λ sanity control), so sampling is now validated. Historical note kept
+    for the chronology; it is not the current status.
   - **Two environment findings for the real engine (not just the smoke test):**
     1. **hcoll:** `gmx_mpi` has a baked-in `NEEDED` on `libhcoll.so.1`/`libocoms.so.0`
        (from `/opt/mellanox/hcoll/lib`, inert — MPI routes via `libmpi`). Some
@@ -159,31 +159,25 @@ Constraints baked in:
   - → **CLAUDE.md gotcha added.** REST2 engine must (a) be built against a working
     GROMACS+PLUMED, and (b) gate on a nonzero-acceptance self-check (fail loud).
 
-## Open questions / next steps
+## Resolution — all complete (engine shipped)
 
-0. **BLOCKER — fix the build.** `-hrex` produces zero exchanges on `2024.3-plumed_2.9.4`.
-   Pick a working GROMACS+PLUMED (options below) and rebuild before anything else.
-   Then re-run the acceptance test (8-rep fine ladder in `accept8/`) and confirm
-   nonzero exchanges. **Everything below is gated on this.**
-   - Option A (safest, forum-confirmed): **GROMACS 2023.5 + PLUMED 2.9.x**, a dedicated
-     REST2 build (`$HOME/opt/gromacs/2023.5-plumed`) alongside the existing 2024.3 (kept
-     for T-REMD/MD). Recipe drafted 2026-07-29:
-     `scripts/installation/install_gromacs-2023.5-plumed.sh`. CUDA: builds against
-     **cuda/12.4.0** (via `module load deprecated-modules`) — a good match for 2023.5.
-     **The REST2 run engine must load the same cuda/12.4.0 to match this binary**
-     (NOT cuda/12.9.1, which the T-REMD/MD engines use for the 2024.3 build).
-   - Option B (modern, single toolchain): **GROMACS 2025 + PLUMED 2.10** native
-     interface — but that migrates the T-REMD/MD production toolchain too, with its
-     own validation burden.
-1. ~~GPU `-hrex` update-mode~~ — moot: exchanges are 0 regardless of update mode.
-2. Re-validate acceptance on the fixed build (nonzero exchanges on the fine ladder).
-3. Default λ ladder + replica count — acceptance-rate tuning per system, like REMD.
-4. Charge-scaling makes scaled replicas non-neutral (PME background neutralizes) —
-   standard REST2 practice; note in the output guide.
-5. Engine must carry the hcoll `LD_LIBRARY_PATH` handling + `-C rocky8`, `-dlb no`
-   (canonical hrex requirement; matters if >1 rank/replica), AND a nonzero-acceptance
-   self-check that fails loud (so a broken build can never again masquerade as a
-   working REST2 run). Invocation verified against the PLUMED hrex doc 2026-07-29 —
-   our command matched on every requirement; `-dlb no` was the only omission and is
-   not the cause of the 0-exchange bug (dlb is inactive with 1 rank/replica).
-6. Write the engine.
+Every item below was resolved; REST2 is a production engine, not a work in progress. Kept
+as a record of what was closed out.
+
+0. **Build fixed (was the blocker).** Chose Option A — a dedicated **GROMACS 2023.5 +
+   PLUMED 2.9.4** build at `$HOME/opt/gromacs/2023.5-plumed`, alongside the existing 2024.3
+   (kept for T-REMD/MD). `install_gromacs-2023.5-plumed.sh` shipped; builds against
+   **cuda/12.4.0** (`deprecated-modules`), and the engine loads the same via `REST2_CUDA_MODULE`.
+   hrex verified working (job 19186450): identical-λ sanity P=1.0, fine-ladder acceptance
+   0.65–0.82. (Option B, GROMACS 2025 + PLUMED 2.10, not pursued — would migrate the whole
+   toolchain.)
+1. ~~GPU `-hrex` update-mode~~ — resolved: GPU-resident update works (no `-update cpu` needed).
+2. **Acceptance validated** on the fixed build (nonzero exchanges on the fine ladder).
+3. **λ ladder + replica count** — geometric effective-T ladder implemented; per-system
+   acceptance tuning is inherent usage (like REMD's temperature spacing), not a gap.
+4. **Charge-scaling / PME neutral background** — standard REST2 practice; noted in
+   `REST2-output-guide.md`.
+5. **Engine carries** the hcoll `LD_LIBRARY_PATH` handling, `-C rocky8`, `-dlb no`, and the
+   fail-loud `check_hrex_acceptance.py` nonzero-acceptance gate (a broken build can never
+   again masquerade as a working REST2 run).
+6. **Engine written** — `scripts/simulation/REST2-gromacs.sbatch` (15 steps).

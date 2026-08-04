@@ -14,12 +14,18 @@ export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/
 # === Replicas & effective-temperature ladder ===
 REPLICAS=16
 T_MIN=300          # physical temperature (ALL replicas)
-T_MAX=400          # EFFECTIVE max solute temperature (top of the lambda ladder)
+T_MAX=500          # EFFECTIVE max solute temperature (top of the lambda ladder)
 
 # === Production ===
 TOTAL_NS=2
 REPLEX_PS=1        # exchange attempt interval (ps); keep >= 1
 ENSEMBLE=NPT       # NVT | NPT
+
+# === Reproducibility ===
+# -1 (default) = fresh random seed each run. Set to a non-negative integer to pin the RNG
+# (velocity generation, V-rescale/C-rescale streams, replica exchange; per-replica = SEED+i).
+# NOTE: on GPU this fixes initial conditions and RNG streams, not a bit-for-bit trajectory.
+SEED=-1
 
 # === System ===
 PDB_IN="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/input_pdbs/helix_fusion.pdb"
@@ -29,6 +35,6 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 # The engine's #SBATCH header targets pi_keating; add -p / --gres here to override,
 # e.g. to build-portable mit_normal_gpu nodes:  -p mit_normal_gpu --gres=gpu:l40s:4
-sbatch -n "$REPLICAS" --gres=gpu:2\
-  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE" \
+sbatch -n "$REPLICAS"\
+  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE",SEED="$SEED" \
   "${GROMACS_SCRIPTS_DIR}/REST2-gromacs.sbatch"

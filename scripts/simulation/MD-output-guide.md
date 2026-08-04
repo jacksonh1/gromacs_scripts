@@ -31,18 +31,27 @@ no thermostat/barostat switch.
 
 ```
 OUTDIR/
-├── build/                  # Step 2 — System building
-├── em/                     # Step 3 — Energy minimization
-├── heat/                   # Step 4 — Heat (NVT, restrained)
-├── density/                # Step 5 — Density equilibration (NPT, restrained, iterative)
-├── relax/                  # Step 6 — Relax (unrestrained NPT) — only if RELAX_NS>0
-├── prod/                   # Step 7 — Production MD (NPT, unrestrained)
-├── logs/                   # mdrun stdout logs
-├── trajectories/           # Symlinks to scratch trajectories
-├── analysis/               # Step 10 — post-analysis outputs
+├── build/                  # Step 2 — System building                    [REAL]
+├── em/                     # Step 3 — Energy minimization                 [REAL]
+├── analysis/               # Step 10 — post-analysis outputs              [REAL]
+├── logs/                   # mdrun stdout logs                            [REAL]
+├── heat/     ─▶ scratch    # Step 4 — Heat (NVT, restrained)              [SYMLINK]
+├── density/  ─▶ scratch    # Step 5 — Density equilibration (NPT, restrained, iterative)
+├── relax/    ─▶ scratch    # Step 6 — Relax (unrestrained NPT) — only if RELAX_NS>0
+├── prod/     ─▶ scratch    # Step 7 — Production MD (NPT, unrestrained)   [SYMLINK]
+│                           #   prod/md.xtc = the production trajectory (analyze directly)
 ├── parameters.txt          # Summary of all job parameters
 └── <OUTBASE>_final.pdb     # Final structure exported from production
 ```
+
+**Output model (folder-symlink).** The small dirs (`build/ em/ analysis/ logs/`,
+`parameters.txt`, final PDB) are **real** in `OUTDIR`; the bulk stage dirs (`heat/
+density/ [relax/] prod/`) are **folder symlinks into scratch** (`SCRATCH_DIR`), so
+mdrun writes trajectories straight onto scratch — quota-safe, laptop-sync-friendly, and
+analysis reads `prod/md.xtc` through the symlink with no path change. On success the
+run copies the real dirs into `SCRATCH_DIR` so the scratch archive stands alone. Set
+**`SYMLINK_BULK=0`** to keep the stage dirs **real in `OUTDIR`** with no scratch
+offload; everything else here is identical.
 
 ---
 
@@ -135,18 +144,22 @@ either way; the ensemble matches equilibration, so there is no thermostat/barost
 | `md.gro` | Final structure |
 | `md.cpt` | Checkpoint (use to restart/extend) |
 
-> `logs/mdrun_md.log` contains mdrun stdout. The trajectory (`md.xtc`) is written
-> to scratch and symlinked into `trajectories/`.
+> `logs/mdrun_md.log` contains mdrun stdout. The production trajectory is
+> `prod/md.xtc`, which lives on scratch via the `prod/` folder symlink (or in
+> `OUTDIR` when `SYMLINK_BULK=0`).
 
-### `trajectories/`
+### Where the trajectories live
 
-Symlinks pointing to the actual trajectory files on scratch (`SCRATCH_DIR`):
-- `md.xtc` — production trajectory
-- `heat.xtc` — heat-stage (NVT) trajectory
-- `relax.xtc` — relax-stage (unrestrained NPT) trajectory (only if `RELAX_NS>0`)
-- `<OUTBASE>_density_seg<N>.xtc` — NPT density equilibration trajectories
+There is **no `trajectories/` collection dir**. Under the folder-symlink model each
+`.xtc` sits in its stage dir, which is a symlink into scratch (`SCRATCH_DIR`):
+- `prod/md.xtc` — production trajectory (the analysis target)
+- `heat/heat.xtc` — heat-stage (NVT) trajectory
+- `relax/relax.xtc` — relax-stage (unrestrained NPT) trajectory (only if `RELAX_NS>0`)
+- `density/<OUTBASE>_density_seg<N>.xtc` — NPT density equilibration trajectories
 
-> These live under `SCRATCH_ROOT`. Copy them before scratch is purged.
+> These resolve to `SCRATCH_DIR` under `SCRATCH_ROOT`, which also holds a self-contained
+> copy of `analysis/ logs/ em/ build/` + `parameters.txt`. Copy anything you need
+> long-term. With `SYMLINK_BULK=0` the stage dirs are real in `OUTDIR` (no scratch copy).
 
 ### `analysis/` — Post-analysis (Step 10)
 
@@ -196,4 +209,4 @@ timestep, production length, NPT convergence segments, etc.) and the scratch pat
 | RMSD / Rg / RMSF / DSSP | `analysis/md_{rmsd,rg,rmsf,dssp}.*` |
 | Conformational states | `analysis/clustering/md_cluster_summary.txt` + `md_cluster_rep_c*.pdb` (representative structures) |
 | Re-run post-processing | `bash scripts/analysis/run_analysis.sh OUTDIR` (regenerates the whole `analysis/` dir; no resubmission) |
-| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/md.tpr trajectories/md.xtc analysis/md_pbc.xtc` |
+| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/md.tpr prod/md.xtc analysis/md_pbc.xtc` |

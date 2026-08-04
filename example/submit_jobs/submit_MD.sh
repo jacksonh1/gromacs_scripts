@@ -9,6 +9,12 @@ T_SIM=300        # single production temperature (K)
 TOTAL_NS=2       # total production length (ns)
 TRAJ_PS=10       # write a trajectory frame every this many ps
 
+# === Reproducibility ===
+# -1 (default) = fresh random seed each run. Set to a non-negative integer to pin the RNG
+# (velocity generation + V-rescale/C-rescale streams). NOTE: on GPU this fixes the initial
+# conditions and RNG streams, not a bit-for-bit identical trajectory.
+SEED=-1
+
 # === Equilibration (optional) ===
 # RELAX_NS: unrestrained NPT relaxation (relax/ stage) before production (ns).
 #   0 (default) — restraints release at production START, so the trajectory
@@ -26,5 +32,5 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 
 sbatch \
-  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_SIM="$T_SIM",TOTAL_NS="$TOTAL_NS",TRAJ_PS="$TRAJ_PS",RELAX_NS="${RELAX_NS:-0}" \
+  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_SIM="$T_SIM",TOTAL_NS="$TOTAL_NS",TRAJ_PS="$TRAJ_PS",RELAX_NS="${RELAX_NS:-0}",SEED="$SEED" \
   "${GROMACS_SCRIPTS_DIR}/MD-gromacs.sbatch"

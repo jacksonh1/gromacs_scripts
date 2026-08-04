@@ -28,27 +28,33 @@ outputs/output_REST2/helix_fusion-20ns-REST2-300-450Keff-24reps-NVT-exf-1ps/
 
 ```
 OUTDIR/
-├── build/                        # Step 3  — System building (pdb2gmx→editconf→solvate→genion)
-├── em/                           # Step 4  — Energy minimization
-├── density/                      # Step 5  — NPT density equilibration (iterative)
-├── topol/                        # Step 6  — Per-replica SCALED topologies
+├── build/                        # Step 3  — System building                     [REAL]
+├── em/                           # Step 4  — Energy minimization                  [REAL]
+├── topol/                        # Step 6  — Per-replica SCALED topologies        [REAL]
 │   ├── processed.top             #           grompp -pp expansion (unscaled)
 │   ├── marked.top                #           protein atom types tagged "_" (mark_hot_region.py)
 │   └── topol_rep000.top … NNN    #           plumed partial_tempering lambda_i  (rep000 = lambda 1)
-├── equil/                        # Steps 7–8 — Per-replica equilibration (all at T_MIN, scaled H)
+├── analysis/                     # Post-analysis (rep000)                         [REAL]
+├── logs/                         # mdrun stdout logs (incl. mdrun_preflight.log)  [REAL]
+├── density/  ─▶ scratch          # Step 5  — NPT density equilibration (iterative)  [SYMLINK]
+├── equil/    ─▶ scratch          # Steps 7–8 — Per-replica equilibration (all at T_MIN, scaled H)
 │   ├── rep000/ … repNNN/
-├── prod/                         # Steps 9–11 — REST2 production
+├── prod/     ─▶ scratch          # Steps 9–11 — REST2 production                  [SYMLINK]
 │   ├── rep000/                   #           lambda=1 → the physical T_MIN ensemble
-│   │   ├── rest2.tpr  rest2.log  rest2.gro  rest2.cpt
+│   │   ├── rest2.tpr  rest2.log  rest2.gro  rest2.cpt  rest2.xtc
 │   │   └── plumed.dat            #           minimal (hrex needs -plumed; no CVs)
 │   └── rep001/ … repNNN/
-├── logs/                         # mdrun stdout logs (incl. mdrun_preflight.log)
-├── trajectories/                 # Symlinks to scratch trajectories (rest2_repNNN.xtc, …)
-├── analysis/                     # Post-analysis (rep000): RMSD/Rg/RMSF/DSSP, clustering,
-│                                 #   remd_acceptance.csv (per-pair exchange rates)
 ├── parameters.txt                # Summary of all job parameters (incl. the lambda ladder)
 └── <OUTBASE>_final_rep000.pdb    # Final structure from replica 000
 ```
+
+**Output model (folder-symlink).** Small dirs (`build/ em/ topol/ analysis/ logs/`,
+`parameters.txt`, final PDB) are **real** in `OUTDIR`; the bulk stage dirs (`density/
+equil/ prod/`) are **folder symlinks into scratch** (`SCRATCH_DIR`), so mdrun writes
+straight onto scratch and analysis reads `prod/rep000/rest2.xtc` through the symlink.
+On success the run copies the real dirs (incl. `topol/`) into `SCRATCH_DIR` so the
+scratch archive stands alone. Set **`SYMLINK_BULK=0`** to keep the stage dirs **real in
+`OUTDIR`** with no scratch offload; everything else here is identical.
 
 ---
 
@@ -56,7 +62,7 @@ OUTDIR/
 
 | Path | What it is |
 |------|------------|
-| `prod/rep000/rest2.xtc` (→ `trajectories/rest2_rep000.xtc`) | **The analysis target** — the unscaled `T_MIN` ensemble |
+| `prod/rep000/rest2.xtc` | **The analysis target** — the unscaled `T_MIN` ensemble (on scratch via the `prod/` symlink) |
 | `prod/rep000/rest2.log` | Exchange log; the `Replica exchange statistics` block has per-pair acceptance |
 | `topol/topol_rep*.top` | The scaled Hamiltonians (reproducible from `marked.top` + lambda) |
 | `analysis/remd_acceptance.csv` | Per-pair exchange acceptance (target ~20–40%; retune the ladder if far off) |

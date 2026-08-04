@@ -32,7 +32,8 @@ _SHARED_JOB = {
     "PDB_IN", "OUTBASE", "OUTDIR", "FF", "WATER", "BOX_SHAPE", "BOX_BUFFER",
     "NEUTRALIZE", "SALT_MOLAR", "DT_PS", "CUTOFF_NM", "GAMMA_LN", "TOTAL_NS",
     "DENSITY_SEG_STEPS", "DENSITY_MIN_SEG", "DENSITY_MAX_SEG", "DENSITY_TOL_REL",
-    "PRESERVE_SCRATCH_FROM", "SCRATCH_DIR", "SCRATCH_ROOT", "GMX",
+    "PRESERVE_SCRATCH_FROM", "SYMLINK_BULK", "SCRATCH_DIR", "SCRATCH_ROOT", "GMX",
+    "SEED",
 }
 # EQUIL_NS (REMD per-replica equil) and HEAT_NS (MD NVT heat) are NOT shared: the same
 # clock means a different stage per engine, so each engine names its own (see CLAUDE.md
@@ -131,12 +132,25 @@ def validate_values(engine):
     psf = env.get("PRESERVE_SCRATCH_FROM", "")
     if psf not in ("", "prod", "density", "always", "never"):
         errs.append(f"[ERROR] PRESERVE_SCRATCH_FROM must be one of prod|density|always|never (got '{psf}')")
+    # Output model: 1 (default) = bulk stage dirs are folder-symlinks into scratch;
+    # 0 = everything real in OUTDIR, no scratch offload.
+    flag01("SYMLINK_BULK")
     salt = env.get("SALT_MOLAR", "")
     if salt != "":
         v = as_num("SALT_MOLAR", salt, integer=False)
         if v is not None and v < 0:
             errs.append(f"[ERROR] SALT_MOLAR must be >= 0 (got '{salt}')")
     flag01("NEUTRALIZE")
+
+    # RNG seed for reproducibility. -1 (default) = GROMACS draws a random seed per run
+    # (unchanged legacy behaviour); >= 0 = deterministic setup (velocity generation,
+    # V-rescale/C-rescale streams, replica-exchange RNG). Per-replica stages offset it by
+    # the replica index, so the base must be a non-negative integer when pinned.
+    seed_raw = env.get("SEED", "")
+    if seed_raw != "":
+        v = as_num("SEED", seed_raw, integer=True)
+        if v is not None and v < -1:
+            errs.append(f"[ERROR] SEED must be -1 (random) or a non-negative integer (got '{seed_raw}')")
 
     # ── engine-specific ──
     # REST2 shares REMD's parameter set and checks (T_MAX is the EFFECTIVE max solute

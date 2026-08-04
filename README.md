@@ -157,7 +157,17 @@ always NPT.
 
 ## Output & Analysis
 
-Large trajectory files (`.xtc`) are written to `SCRATCH_ROOT` and symlinked into `OUTDIR/trajectories/`. Copy them before scratch is purged.
+**Output model (folder-symlink).** Small, laptop-worthy dirs (`build/ em/ analysis/
+logs/`, `parameters.txt`, final PDB) stay **real** in `OUTDIR`. The bulk stage dirs
+(`prod/ equil/ density/`, plus `heat/ relax/` for MD) are **folder symlinks into
+scratch** (`SCRATCH_DIR` under `SCRATCH_ROOT`), so mdrun writes the large trajectories
+straight onto scratch — the tight-quota pool is never touched and a laptop rsync of
+`OUTDIR` sees only a few broken folder-links instead of thousands of file-links.
+Analysis reads e.g. `prod/rep000/remd.xtc` through the symlink (no path change). On
+success the run also copies the real dirs into `SCRATCH_DIR`, so the scratch archive is
+self-contained. Copy anything you need long-term. Set **`SYMLINK_BULK=0`** to keep
+everything **real in `OUTDIR`** with no scratch offload (e.g. when `OUTDIR` is already on
+a large disk).
 
 Post-analysis runs automatically at the end of **both** engines' jobs — PBC fix, protein
 strip + backbone align, then RMSD / Rg / RMSF / DSSP and conformational clustering. T-REMD

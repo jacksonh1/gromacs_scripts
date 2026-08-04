@@ -246,8 +246,10 @@ bash run_analysis.sh OUTDIR          # plain MD
 bash run_analysis.sh OUTDIR 000      # T-REMD, lowest-T slot
 ```
 Re-runs overwrite cleanly (GROMACS backups are disabled inside the script), so it
-is idempotent. It needs the production trajectory still present — `trajectories/*.xtc`
-are symlinks into scratch, so copy them off scratch before it is purged.
+is idempotent. It needs the production trajectory still present — under the
+folder-symlink output model it reads `prod/md.xtc` or `prod/rep<REP>/remd.xtc`, which
+resolves through the `prod/` folder symlink into scratch (or is a real file when
+`SYMLINK_BULK=0`). Copy anything you need off scratch before it is purged.
 
 ## Multi-chain complexes
 
@@ -305,7 +307,7 @@ runs, for when you want just one metric or a custom reference.
 ### Plain MD
 ```bash
 TPR=OUTDIR/prod/md.tpr
-XTC=OUTDIR/trajectories/md.xtc
+XTC=OUTDIR/prod/md.xtc
 P=OUTDIR/analysis/md
 
 bash   fix_PBC_strip_align.sh "$TPR" "$XTC" "$P"
@@ -320,7 +322,7 @@ Same as above, but the inputs are the lowest-T slot and the prefix is
 `remd_rep000`, plus the REMD-only acceptance-rate QC:
 ```bash
 TPR=OUTDIR/prod/rep000/remd.tpr
-XTC=OUTDIR/trajectories/remd_rep000.xtc
+XTC=OUTDIR/prod/rep000/remd.xtc
 P=OUTDIR/analysis/remd_rep000
 
 python remd_acceptance.py OUTDIR              # QC: exchange acceptance rates

@@ -13,8 +13,12 @@ OUTBASE="IL7-2-V3-cys"
 # OUTDIR="remd_${OUTBASE}"            # auto-derived from OUTBASE
 
 # ── Force field / box ───────────────────────────────────────────────────────
-# FF="amber14sb"                      # pdb2gmx force field name
-# WATER="tip3p"
+# FF="amber14sb"                      # pdb2gmx force field name (default: amber99sb-ildn)
+#                                     #   FF="charmm36m" → CHARMM36m (needs GMXLIB set in
+#                                     #   site_config.sh); auto-switches the mdp to force-switch
+#                                     #   vdW at 1.2 nm + DispCorr=no and forces CUTOFF_NM=1.2.
+# WATER="tip3p"                       # resolved inside the FF dir: amber→standard TIP3P,
+#                                     #   charmm36m→CHARMM-modified TIP3P (automatic, matched)
 # BOX_SHAPE="dodecahedron"            # dodecahedron ≈ truncated octahedron
 # BOX_BUFFER="1.0"                    # nm  (10 Å)
 # NEUTRALIZE=1
@@ -30,6 +34,9 @@ T_MAX=400
 # DT_PS="0.002"                       # timestep in ps
 # CUTOFF_NM="0.9"                     # non-bonded cutoff in nm (9 Å)
 # GAMMA_LN="2.0"                      # Langevin friction (ps^-1)
+# SEED=-1                             # -1 (default): random per run. >=0: pin RNG (velocity gen,
+#                                     #   V-rescale/C-rescale, exchange; per-replica = SEED+i).
+#                                     #   GPU runs are not bit-for-bit reproducible regardless.
 
 # ── Production ───────────────────────────────────────────────────────────────
 TOTAL_NS=20                           # ns per replica
@@ -45,9 +52,13 @@ REPLEX_PS="0.5"                       # exchange attempt interval (ps)
 # DENSITY_MAX_SEG=20
 # DENSITY_TOL_REL="0.005"             # relative volume change tolerance
 
-# ── Scratch ──────────────────────────────────────────────────────────────────
+# ── Scratch / output model ────────────────────────────────────────────────────
 # SCRATCH_DIR="/path/to/fast/storage/${SLURM_JOB_ID}"
 # PRESERVE_SCRATCH_FROM=prod          # prod|density|always|never — keep scratch on failure from this stage
+# SYMLINK_BULK=1                      # 1 (default): bulk stage dirs (prod/ equil/ density/ …) are folder
+#                                     #   symlinks into scratch — quota-safe, laptop-sync-friendly.
+#                                     # 0: everything real in OUTDIR, no scratch offload (use when OUTDIR
+#                                     #   is already on a large disk).
 
 # ── GROMACS binary ───────────────────────────────────────────────────────────
 # GMX="gmx_mpi"                       # this build provides gmx_mpi only; leave unset

@@ -18,11 +18,12 @@ OUTDIR/
     rep001/           ← temperature slot 1
     ...
     rep047/           ← temperature slot N-1 (highest T)
-  trajectories/
-    remd_rep000.xtc   ← concatenated/copied trajectory for convenient access
-    ...
   analysis/           ← created by analysis scripts
 ```
+
+> `prod/` is a folder symlink into scratch (`SCRATCH_DIR`) under the default output
+> model (`SYMLINK_BULK=1`), so `prod/rep000/remd.xtc` resolves onto scratch. There is no
+> separate `trajectories/` dir. (With `SYMLINK_BULK=0`, `prod/` is a real dir in OUTDIR.)
 
 **Critical:** each `rep{i}/` directory corresponds to a **fixed temperature slot**,
 not a specific configuration (molecule). Coordinates are exchanged between slots at
@@ -200,7 +201,7 @@ per-frame operation and is safe.
 ```bash
 printf "Protein\nSystem\n" | gmx trjconv \
   -s prod/rep000/remd.tpr \
-  -f trajectories/remd_rep000.xtc \
+  -f prod/rep000/remd.xtc \
   -o analysis/remd_rep000_pbc.xtc \
   -pbc mol -center -ur compact
 ```

@@ -18,22 +18,37 @@ outputs/output_T-REMD-gromacs/DB2_unbound-5ns-REMD-300-450K-48reps-NVT/
 
 ```
 OUTDIR/
-├── build/                        # Step 3 — System building
-├── em/                           # Step 4 — Energy minimization
-├── density/                          # Step 5 — NPT density equilibration
-├── equil/                          # Steps 6–7 — Per-replica equilibration (NVT, or NPT if ENSEMBLE=NPT)
-│   ├── rep000/
+├── build/                        # Step 3 — System building            [REAL]
+├── em/                           # Step 4 — Energy minimization         [REAL]
+├── analysis/                     # Step 12 — Post-analysis outputs      [REAL]
+├── density/  ─▶ scratch          # Step 5 — NPT density equilibration   [SYMLINK]
+├── equil/    ─▶ scratch          # Steps 6–7 — Per-replica equilibration (NVT, or NPT if ENSEMBLE=NPT)
+│   ├── rep000/                   #            (each rep dir + its remd/equil.xtc lives on scratch)
 │   ├── rep001/
 │   └── ... (one per replica)
-├── prod/                         # Steps 8–9 — REMD production
-│   ├── rep000/
+├── prod/     ─▶ scratch          # Steps 8–9 — REMD production          [SYMLINK]
+│   ├── rep000/                   #   rep000/remd.xtc = the 300 K ensemble (analyze directly)
 │   ├── rep001/
 │   └── ... (one per replica)
-├── logs/                         # mdrun stdout logs
-├── trajectories/                 # Symlinks to scratch trajectories
+├── logs/                         # mdrun stdout logs                    [REAL]
 ├── parameters.txt                # Summary of all job parameters
 └── <OUTBASE>_final_rep000.pdb    # Final structure exported from replica 000
 ```
+
+**Output model (folder-symlink).** The small, laptop-worthy dirs (`build/ em/
+analysis/ logs/`, `parameters.txt`, the final PDB) are **real** in `OUTDIR`. The bulk
+stage dirs (`density/ equil/ prod/`) are **folder symlinks into scratch**
+(`SCRATCH_DIR`), created before the run so mdrun writes trajectories and per-replica
+intermediates straight onto scratch — the tight-quota pool is never touched, and a
+laptop rsync of `OUTDIR` sees just 3 broken folder-links (harmless; `--exclude` them or
+leave them). Analysis reads the trajectory through the `prod/` symlink, so no path
+changes are needed. On success the run copies the real dirs into `SCRATCH_DIR` too, so
+the scratch archive is a self-contained record.
+
+Set **`SYMLINK_BULK=0`** to disable this: the stage dirs are then **real in `OUTDIR`**
+with no scratch offload (use when `OUTDIR` is already on a large disk). Everything else
+in this guide is identical either way — only whether `density/ equil/ prod/` are
+symlinks vs real changes.
 
 ---
 
@@ -138,7 +153,8 @@ The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate
 | `remd.cpt` | Checkpoint (use to restart/extend the run) |
 
 > `logs/mdrun_remd.log` contains combined mdrun stdout.
-> Trajectories (`.xtc`) are written to scratch and symlinked into `trajectories/`.
+> Trajectories (`.xtc`) sit in each rep dir (`prod/rep<NNN>/remd.xtc`), which lives on
+> scratch via the `prod/` folder symlink (or in `OUTDIR` when `SYMLINK_BULK=0`).
 
 ---
 
@@ -151,14 +167,19 @@ The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate
 
 ---
 
-### `trajectories/`
+### Where the trajectories live
 
-Symlinks pointing to the actual trajectory files on scratch (`SCRATCH_DIR`). Named:
-- `equil_rep<NNN>.xtc` — per-replica equilibration trajectory
-- `remd_rep<NNN>.xtc` — production trajectory per replica
-- `<OUTBASE>_density_seg<N>.xtc` — density equilibration trajectories
+There is **no `trajectories/` collection dir**. Under the folder-symlink model each
+`.xtc` sits in its stage dir, which is a symlink into scratch (`SCRATCH_DIR`):
+- `prod/rep<NNN>/remd.xtc` — production trajectory per replica (rep000 = 300 K ensemble)
+- `equil/rep<NNN>/equil.xtc` — per-replica equilibration trajectory
+- `density/<OUTBASE>_density_seg<N>.xtc` — density equilibration trajectories
 
-> These files live in `/orcd/data/keating/001/<user>/MD/<jobid>_<timestamp>/`. Copy them before the scratch is purged.
+> These resolve to `SCRATCH_DIR` (default
+> `/orcd/data/keating/001/<user>/MD/<jobid>_<timestamp>/`), which also holds a
+> self-contained copy of `analysis/ logs/ em/ build/` + `parameters.txt`. The data
+> drive is durable and not auto-wiped, but copy anything you need long-term. With
+> `SYMLINK_BULK=0` the stage dirs are real in `OUTDIR` and there is no scratch copy.
 
 ---
 
@@ -179,7 +200,7 @@ A plain-text record of all simulation parameters (force field, temperatures, tim
 | RMSD / Rg / RMSF / DSSP | `analysis/remd_rep000_{rmsd,rg,rmsf,dssp}.*` |
 | Conformational states | `analysis/clustering/remd_rep000_cluster_summary.txt` + `remd_rep000_cluster_rep_c*.pdb` (representative structures); `_cluster_{populations,timeseries}.png`, `_cluster_assignments.csv` |
 | Re-run post-processing | `bash scripts/analysis/run_analysis.sh OUTDIR 000` (regenerates the whole `analysis/` dir; no resubmission) |
-| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/rep000/remd.tpr trajectories/remd_rep000.xtc analysis/remd_rep000_pbc.xtc` — keeps full-system trajectory |
+| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/rep000/remd.tpr prod/rep000/remd.xtc analysis/remd_rep000_pbc.xtc` — keeps full-system trajectory |
 
 > **Note on demux:** `gmx demux` follows a single *configuration* as it walks through temperature space. It is NOT needed to obtain the constant-T ensemble. `rep000/remd.xtc` already is the 300 K ensemble — each replica runs at a fixed temperature and coordinates are exchanged between replicas, so the slot trajectory is the correct thermodynamic ensemble at that temperature.
 

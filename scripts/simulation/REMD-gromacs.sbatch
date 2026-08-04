@@ -71,6 +71,10 @@ PDB_IN="${PDB_IN:-}"                          # required (validated below) — n
 OUTBASE="${OUTBASE:-$(basename "${PDB_IN%.*}")}"
 OUTDIR="${OUTDIR:-remd_${OUTBASE}}"
 FORCE="${FORCE:-0}"
+# Output model: 1 (default) = bulk stage dirs (density/ equil/ prod/) are folder
+# symlinks into scratch (quota-safe, laptop-sync-friendly); 0 = everything real in
+# OUTDIR with no scratch offload.
+SYMLINK_BULK="${SYMLINK_BULK:-1}"
 
 # Force field & water model
 FF="${FF:-amber99sb-ildn}"          # GROMACS ff name
@@ -96,7 +100,34 @@ DT_PS="${DT_PS:-0.002}"
 T_MIN="${T_MIN:-300}"
 T_MAX="${T_MAX:-400}"
 CUTOFF_NM="${CUTOFF_NM:-1.0}"           # 10 Å = 1.0 nm
+
+# ── Force-field-dependent nonbonded settings ─────────────────────────────────
+# CHARMM force fields require force-switched vdW (switch at 1.0 nm, rvdw=rcoulomb=
+# 1.2 nm) and NO analytic dispersion correction; AMBER uses a plain Verlet cutoff
+# at CUTOFF_NM with DispCorr=EnerPres. FF=charmm* selects the CHARMM nonbonded
+# block. VDW_BLOCK carries its own trailing newline, so the AMBER branch (empty)
+# leaves the generated mdp byte-identical to before.
+if [[ "$FF" == charmm* ]]; then
+  [[ "$CUTOFF_NM" == "1.2" ]] || echo "[INFO] FF=$FF requires force-switched vdW at 1.2 nm — overriding CUTOFF_NM=${CUTOFF_NM} → 1.2 (switch at 1.0)"
+  CUTOFF_NM="1.2"
+  DISPCORR="no"
+  VDW_BLOCK=$'vdwtype      = cutoff\nvdw-modifier = force-switch\nrvdw-switch  = 1.0\n'
+else
+  DISPCORR="EnerPres"
+  VDW_BLOCK=""
+fi
 GAMMA_LN="${GAMMA_LN:-2.0}"             # ps^-1  (tau_t = 1/gamma)
+
+# RNG seed. -1 (default) = GROMACS draws a fresh random seed per run (legacy behaviour,
+# each run an independent sample). Set SEED>=0 to pin the setup: velocity generation,
+# the stochastic V-rescale/C-rescale streams, and the replica-exchange RNG. Per-replica
+# stages offset it by the replica index (SEED+i) so replicas stay decorrelated. NOTE: GPU
+# runs are still not bit-for-bit reproducible (nondeterministic float reduction order); a
+# fixed seed pins the initial conditions and RNG streams, not the exact trajectory.
+SEED="${SEED:--1}"
+# Per-replica seed: keep -1 (random) when SEED is -1, else offset the base by the replica
+# index so each replica's velocity draw and V-rescale/C-rescale stream is decorrelated.
+rep_seed() { if [[ "$SEED" == "-1" ]]; then echo -1; else echo $(( SEED + $1 )); fi; }
 
 # REMD exchange & production
 REPLEX_PS="${REPLEX_PS:-0.5}"            # attempt exchange every this many ps
@@ -120,7 +151,7 @@ TAU_P="${TAU_P:-1.0}"                    # ps   (NPT only)
 export PDB_IN OUTBASE OUTDIR FORCE FF WATER BOX_SHAPE BOX_BUFFER NEUTRALIZE \
        SALT_MOLAR REPLICAS NTOMP_SERIAL DT_PS T_MIN T_MAX CUTOFF_NM GAMMA_LN \
        REPLEX_PS TOTAL_NS EQUIL_NS DENSITY_SEG_STEPS DENSITY_MIN_SEG DENSITY_MAX_SEG \
-       DENSITY_TOL_REL ENSEMBLE REF_P TAU_P PRESERVE_SCRATCH_FROM CFG_REPLICAS
+       DENSITY_TOL_REL ENSEMBLE REF_P TAU_P PRESERVE_SCRATCH_FROM SYMLINK_BULK SEED CFG_REPLICAS
 python3 "$VALIDATE_PARAMS" --engine remd
 
 # Derived step counts (after validation, so a non-numeric input fails with a clear
@@ -155,13 +186,23 @@ else
   PCOUPL_BLOCK="pcoupl      = no"
 fi
 
-# Scratch — large trajectory files go here
-SCRATCH_TS="$(date +%Y%m%d-%H%M%S)"
-SCRATCH_ROOT="${SCRATCH_ROOT:-/tmp}"
-SCRATCH_DIR="${SCRATCH_DIR:-${SCRATCH_ROOT}/${SLURM_JOB_ID:-$$}_${SCRATCH_TS}}"
-mkdir -p "$SCRATCH_DIR"
+# Scratch — large trajectory files go here (only when SYMLINK_BULK=1). When 0, bulk
+# stays real in OUTDIR: SCRATCH_DIR is left empty and every scratch-aware step below
+# (ERR-trap cleanup, df check, parameters dual-write, finalize) skips it.
+if (( SYMLINK_BULK )); then
+  SCRATCH_TS="$(date +%Y%m%d-%H%M%S)"
+  SCRATCH_ROOT="${SCRATCH_ROOT:-/tmp}"
+  SCRATCH_DIR="${SCRATCH_DIR:-${SCRATCH_ROOT}/${SLURM_JOB_ID:-$$}_${SCRATCH_TS}}"
+  mkdir -p "$SCRATCH_DIR"
+  DF_TARGET="$SCRATCH_DIR"
+else
+  SCRATCH_DIR=""                 # no scratch offload; bulk lives in OUTDIR
+  mkdir -p "$OUTDIR"             # so the df check below has a real path to probe
+  DF_TARGET="$OUTDIR"
+fi
 
-# Cleanup function
+# Cleanup function — a no-op when SCRATCH_DIR is empty (SYMLINK_BULK=0: bulk is real
+# in OUTDIR, which is never auto-deleted, so a failed run is preserved regardless).
 cleanup_scratch_on_error() {
   local rc=$?
   if [[ -n "$SCRATCH_DIR" && -d "$SCRATCH_DIR" ]]; then
@@ -176,17 +217,37 @@ cleanup_scratch_on_error() {
 }
 trap 'cleanup_scratch_on_error' ERR
 
-# Check scratch space
-SCRATCH_AVAIL=$(df -BG "$SCRATCH_DIR" | awk 'NR==2 {print $4}' | sed 's/G//')
+# Check disk space where the bulk will actually land (scratch, or OUTDIR when SYMLINK_BULK=0)
+SCRATCH_AVAIL=$(df -BG "$DF_TARGET" | awk 'NR==2 {print $4}' | sed 's/G//')
 if (( SCRATCH_AVAIL < 100 )); then
-  echo "[ERROR] Low disk space in scratch: ${SCRATCH_AVAIL}GB available (need ~100GB)"
+  echo "[ERROR] Low disk space in ${DF_TARGET}: ${SCRATCH_AVAIL}GB available (need ~100GB)"
   exit 1
 fi
 
-# ── Output directory tree ────────────────────────────────────────────────────
-mkdir -p "${OUTDIR}"/{build,em,density,equil,prod,logs,trajectories} ./logs
+# ── Output directory tree (folder-symlink model) ─────────────────────────────
+# Small, laptop-worthy dirs stay REAL in OUTDIR. The bulk stage dirs (density/
+# equil/ prod/) are SYMLINKS into scratch when SYMLINK_BULK=1 — created BEFORE the
+# run so mdrun writes trajectories/intermediates straight onto scratch and the
+# tight-quota pool is never touched — or REAL dirs in OUTDIR when SYMLINK_BULK=0.
+# Either way the stage-dir variables below point at ${OUTDIR}/<stage>, so nothing
+# downstream (deffnm/-x/grompp) changes. build/ stays real so the solvate/genion
+# topology rename() stays same-filesystem (see gotcha).
+mkdir -p "${OUTDIR}"/{build,em,logs,analysis} ./logs
+for stage in density equil prod; do
+  if (( SYMLINK_BULK )); then
+    mkdir -p "${SCRATCH_DIR}/${stage}"
+    ln -s "${SCRATCH_DIR}/${stage}" "${OUTDIR}/${stage}"
+  else
+    mkdir -p "${OUTDIR}/${stage}"
+  fi
+done
 
 [[ -f "$PDB_IN" ]] || { echo "[ERROR] PDB not found: $PDB_IN"; exit 1; }
+
+# Record-keeping: preserve the exact input structure alongside the outputs.
+echo "[CMD] cp $PDB_IN ${OUTDIR}/input_structure.pdb"
+cp "$PDB_IN" "${OUTDIR}/input_structure.pdb"
+
 echo "[OK] Parameters set  (${REPLICAS} replicas, ${T_MIN}–${T_MAX} K, ${TOTAL_NS} ns)"
 
 ###############################################################################
@@ -305,7 +366,7 @@ cutoff-scheme = Verlet
 ns_type     = grid
 coulombtype = PME
 rcoulomb    = ${CUTOFF_NM}
-rvdw        = ${CUTOFF_NM}
+${VDW_BLOCK}rvdw        = ${CUTOFF_NM}
 pbc         = xyz
 
 ; Position restraints on protein heavy atoms (uses posre.itp from pdb2gmx)
@@ -349,7 +410,8 @@ while (( seg < DENSITY_MAX_SEG )); do
     GEN_VEL="yes"
     GEN_TEMP="${T_MIN}"
     CONT_FLAGS="gen-vel = yes
-gen-temp = ${T_MIN}"
+gen-temp = ${T_MIN}
+gen-seed = ${SEED}"
     SEG_DT="0.001"
     SEG_STEPS="${DENSITY_SEG_STEPS}"
   else
@@ -371,8 +433,8 @@ cutoff-scheme = Verlet
 nstlist     = 10
 coulombtype = PME
 rcoulomb    = ${CUTOFF_NM}
-rvdw        = ${CUTOFF_NM}
-DispCorr    = EnerPres
+${VDW_BLOCK}rvdw        = ${CUTOFF_NM}
+DispCorr    = ${DISPCORR}
 pbc         = xyz
 
 tcoupl      = V-rescale
@@ -389,6 +451,8 @@ refcoord-scaling = com
 
 constraints = h-bonds
 constraint-algorithm = LINCS
+
+ld-seed     = ${SEED}
 
 ${CONT_FLAGS}
 
@@ -407,7 +471,7 @@ EOF
 
   $GMX mdrun \
     -deffnm "${DENSITY_DIR}/density_seg${seg}" \
-    -x "${SCRATCH_DIR}/${OUTBASE}_density_seg${seg}.xtc" \
+    -x "${DENSITY_DIR}/${OUTBASE}_density_seg${seg}.xtc" \
     -ntomp "$NTOMP_SERIAL" -nb gpu -pme gpu -bonded gpu \
     > "${DENSITY_DIR}/mdrun_density${seg}.log" 2>&1
 
@@ -461,6 +525,7 @@ EQUIL_DIR="${OUTDIR}/equil"
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
   T=${TARR[$i]}
+  RSEED=$(rep_seed "$i")
   REPDIR="${EQUIL_DIR}/rep${idx}"
   mkdir -p "$REPDIR"
 
@@ -476,8 +541,8 @@ cutoff-scheme = Verlet
 nstlist     = 10
 coulombtype = PME
 rcoulomb    = ${CUTOFF_NM}
-rvdw        = ${CUTOFF_NM}
-DispCorr    = EnerPres
+${VDW_BLOCK}rvdw        = ${CUTOFF_NM}
+DispCorr    = ${DISPCORR}
 pbc         = xyz
 
 tcoupl      = V-rescale
@@ -490,8 +555,10 @@ ${PCOUPL_BLOCK}
 constraints = h-bonds
 constraint-algorithm = LINCS
 
+ld-seed     = ${RSEED}
 gen-vel     = yes
 gen-temp    = ${T}
+gen-seed    = ${RSEED}
 
 nstcomm     = 500
 EOF
@@ -505,9 +572,8 @@ EOF
     -po "${REPDIR}/mdout_equil.mdp" \
     -maxwarn 5 \
     > "${REPDIR}/grompp.log" 2>&1
-
-  # Pre-create symlink so deffnm writes the xtc directly to scratch
-  ln -sf "${SCRATCH_DIR}/equil_rep${idx}.xtc" "${REPDIR}/equil.xtc"
+  # No per-file symlink needed: equil/ is a folder symlink into scratch, so
+  # `-deffnm equil` inside equil/rep*/ already writes equil.xtc straight to scratch.
 done
 echo "[OK] equilibration .tpr files prepared for all replicas"
 
@@ -553,6 +619,7 @@ NSTXOUT_COMP=$(python3 -c "print(int(${REPLEX_STEPS}*10))")
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
   T=${TARR[$i]}
+  RSEED=$(rep_seed "$i")
   REPDIR="${PROD_DIR}/rep${idx}"
   mkdir -p "$REPDIR"
 
@@ -568,8 +635,8 @@ cutoff-scheme = Verlet
 nstlist     = 10
 coulombtype = PME
 rcoulomb    = ${CUTOFF_NM}
-rvdw        = ${CUTOFF_NM}
-DispCorr    = EnerPres
+${VDW_BLOCK}rvdw        = ${CUTOFF_NM}
+DispCorr    = ${DISPCORR}
 pbc         = xyz
 
 tcoupl      = V-rescale
@@ -582,6 +649,7 @@ ${PCOUPL_BLOCK}
 constraints = h-bonds
 constraint-algorithm = LINCS
 
+ld-seed     = ${RSEED}
 gen-vel     = no
 continuation = yes
 
@@ -597,9 +665,8 @@ EOF
     -po "${REPDIR}/mdout_remd.mdp" \
     -maxwarn 5 \
     > "${REPDIR}/grompp.log" 2>&1
-
-  # Pre-create symlink so deffnm writes the xtc directly to scratch
-  ln -sf "${SCRATCH_DIR}/remd_rep${idx}.xtc" "${REPDIR}/remd.xtc"
+  # No per-file symlink needed: prod/ is a folder symlink into scratch, so
+  # `-deffnm remd` inside prod/rep*/ already writes remd.xtc straight to scratch.
 done
 echo "[OK] REMD .tpr files prepared"
 
@@ -620,6 +687,7 @@ mpirun -np "$REPLICAS" "$GMX" mdrun \
   -multidir $MULTIDIR_PROD \
   -deffnm remd \
   -replex "$REPLEX_STEPS" \
+  -reseed "$SEED" \
   -ntomp 1 \
   -nb gpu -pme gpu -bonded gpu \
   -pin on \
@@ -636,26 +704,13 @@ done
 echo "[OK] REMD production done"
 
 ###############################################################################
-# STEP 10 — Finalize outputs & symlinks
+# STEP 10 — Export final PDB
 ###############################################################################
+# Trajectories need no finalizing: under the folder-symlink model the .xtc files
+# are already at prod/rep*/remd.xtc (real on scratch via the prod/ symlink, or real
+# in OUTDIR when SYMLINK_BULK=0). The scratch archive is completed in STEP 13.
 CURRENT_STEP=10
-echo "===== STEP 10: Finalizing outputs ====="
-
-# Symlink large trajectory files from scratch into the output tree
-for i in $(seq 0 $((REPLICAS-1))); do
-  idx=$(printf "%03d" "$i")
-  for prefix in equil remd; do
-    src="${SCRATCH_DIR}/${prefix}_rep${idx}.xtc"
-    if [[ -f "$src" ]]; then
-      ln -sf "$src" "${OUTDIR}/trajectories/${prefix}_rep${idx}.xtc"
-    fi
-  done
-done
-
-# Symlink NPT trajectories from scratch
-for f in "${SCRATCH_DIR}/${OUTBASE}_density_seg"*.xtc; do
-  [[ -f "$f" ]] && ln -sf "$f" "${OUTDIR}/trajectories/$(basename "$f")"
-done
+echo "===== STEP 10: Export final PDB ====="
 
 # Export final PDB from replica 000
 echo 0 | $GMX trjconv \
@@ -665,7 +720,7 @@ echo 0 | $GMX trjconv \
   -pbc whole \
   > /dev/null 2>&1 || true
 
-echo "[OK] Outputs finalized"
+echo "[OK] Final PDB exported"
 
 ###############################################################################
 # STEP 11 — Write parameters log
@@ -673,7 +728,11 @@ echo "[OK] Outputs finalized"
 CURRENT_STEP=11
 ELAPSED_S=$(( $(date +%s) - CURRENT_TIME ))
 
-for dest in "${OUTDIR}/parameters.txt" "${SCRATCH_DIR}/parameters.txt"; do
+# Write to OUTDIR always; also to scratch when offloading, so each scratch archive
+# is self-describing. (SYMLINK_BULK=0 → SCRATCH_DIR empty → OUTDIR-only.)
+PARAM_DESTS=( "${OUTDIR}/parameters.txt" )
+[[ -n "$SCRATCH_DIR" ]] && PARAM_DESTS+=( "${SCRATCH_DIR}/parameters.txt" )
+for dest in "${PARAM_DESTS[@]}"; do
   cat > "$dest" <<EOF
 Elapsed seconds: $ELAPSED_S
 Job Name: ${SLURM_JOB_NAME:-remd}
@@ -690,6 +749,7 @@ Salt molarity: $SALT_MOLAR
 Cutoff (nm): $CUTOFF_NM
 tau_t (ps): $TAU_T
 Time step (ps): $DT_PS
+RNG seed: $SEED$( [[ "$SEED" == "-1" ]] && echo " (random per run)" || echo " (fixed; per-replica = SEED+i)" )
 Serial-step OMP threads (EM/density): $NTOMP_SERIAL
 Exchange interval (ps): $REPLEX_PS
 Exchange interval (steps): $REPLEX_STEPS
@@ -697,7 +757,7 @@ Production steps: $PROD_NSTEPS
 Production ensemble: $ENSEMBLE$( [[ "$ENSEMBLE" == NPT ]] && echo " (C-rescale, ref-p ${REF_P} bar, tau-p ${TAU_P} ps)" )
 Per-replica equil ns: $EQUIL_NS
 Output directory: $OUTDIR
-Scratch directory: $SCRATCH_DIR
+Scratch directory: ${SCRATCH_DIR:-(none — SYMLINK_BULK=0, bulk real in OUTDIR)}
 GPUs: ${SLURM_GPUS_ON_NODE:-unknown}
 Density convergence segments: $seg
 EOF
@@ -722,15 +782,36 @@ bash "${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh" "$OUTDIR" 000 \
   || echo "[WARN] run_analysis.sh failed — re-run the command above"
 
 ###############################################################################
-# STEP 13 — Summary
+# STEP 13 — Make the scratch archive self-contained (SYMLINK_BULK=1 only)
+###############################################################################
+# The bulk stages are already real on scratch (written there through the folder
+# symlinks). Copy the small real OUTDIR dirs (analysis/ logs/ em/ build/ +
+# parameters.txt + final PDB) into scratch so it stands alone. No-op when
+# SYMLINK_BULK=0 (nothing was offloaded).
+CURRENT_STEP=13
+if [[ -n "$SCRATCH_DIR" ]]; then
+  echo "===== STEP 13: Finalizing scratch archive ====="
+  echo "[CMD] bash ${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh $OUTDIR $SCRATCH_DIR"
+  bash "${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh" "$OUTDIR" "$SCRATCH_DIR" \
+    || echo "[WARN] finalize_outputs.sh failed — scratch archive may be incomplete; re-run the command above"
+else
+  echo "===== STEP 13: SYMLINK_BULK=0 — bulk is real in OUTDIR; no scratch archive to finalize ====="
+fi
+
+###############################################################################
+# STEP 14 — Summary
 ###############################################################################
 echo ""
 echo "=========================================="
 echo "===== JOB COMPLETED $(date) ====="
 echo "=========================================="
 echo "[INFO] Output directory:   $OUTDIR"
-echo "[INFO] Trajectory links:   ${OUTDIR}/trajectories/"
-echo "[INFO] Actual trajectories: $SCRATCH_DIR"
+if [[ -n "$SCRATCH_DIR" ]]; then
+  echo "[INFO] Stage dirs:         prod/ equil/ density/ are symlinks into scratch"
+  echo "[INFO] Scratch archive:    $SCRATCH_DIR  (self-contained: bulk + copied analysis/logs/em/build)"
+else
+  echo "[INFO] Stage dirs:         prod/ equil/ density/ are real in OUTDIR (SYMLINK_BULK=0)"
+fi
 echo "[INFO] REMD exchange log:  ${PROD_DIR}/rep000/remd.log  (or check all rep dirs)"
 echo "[INFO] Acceptance rates:   ${OUTDIR}/analysis/remd_acceptance.csv"
 echo "[INFO] Processed traj:     ${OUTDIR}/analysis/remd_rep000_stripped_aligned.xtc"

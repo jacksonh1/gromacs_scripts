@@ -90,13 +90,26 @@ if [[ -z "$REPLEX_STEPS" ]]; then
     echo "[ERROR] no '-replex N' found in $ORIG_LOG. Pass --export ...,REPLEX_STEPS=<steps>"; exit 1; }
 fi
 
-echo "[OK] Resuming $REPLICAS replicas from checkpoint (-replex $REPLEX_STEPS)"
+# ── Recover the replica-exchange seed (-reseed) ──────────────────────────────
+# The exchange RNG is counter-based on (seed, step), so a seeded original run only
+# reproduces if the resume passes the SAME -reseed. Recover it from the original log;
+# absent (older seedless run) or no log ⇒ -1 (random), matching that run's behaviour.
+# Override via the SEED env var.
+RESEED="${SEED:-}"
+if [[ -z "$RESEED" && -f "${OUTDIR}/logs/mdrun_remd.log" ]]; then
+  RESEED=$(grep -oE -- '-reseed[[:space:]]+-?[0-9]+' "${OUTDIR}/logs/mdrun_remd.log" | head -1 \
+             | grep -oE -- '-?[0-9]+$' || true)
+fi
+RESEED="${RESEED:--1}"
+
+echo "[OK] Resuming $REPLICAS replicas from checkpoint (-replex $REPLEX_STEPS, -reseed $RESEED)"
 
 # ── Resume production ─────────────────────────────────────────────────────────
 # -cpi remd.cpt enables continuation; with -multidir + -deffnm it resolves to
 # each replica's own remd.cpt/.tpr/.xtc/.edr/.log. Append (the default) restores
 # from the checkpoint and truncates the trajectory/energy/log back to that step
-# before continuing — the scratch .xtc symlinks already point at the originals.
+# before continuing. Under the folder-symlink model prod/ is a symlink into scratch
+# (or a real dir when SYMLINK_BULK=0), so remd.xtc already lives at prod/rep*/remd.xtc.
 # GPU/pin flags mirror REMD-gromacs.sbatch STEP 9.
 RESTART_LOG="${OUTDIR}/logs/mdrun_remd_restart_${SLURM_JOB_ID:-manual}.log"
 
@@ -105,6 +118,7 @@ mpirun -np "$REPLICAS" "$GMX" mdrun \
   -deffnm remd \
   -cpi remd.cpt \
   -replex "$REPLEX_STEPS" \
+  -reseed "$RESEED" \
   -ntomp 1 \
   -nb gpu -pme gpu -bonded gpu \
   -pin on \
@@ -117,14 +131,9 @@ for d in "${REPDIRS[@]}"; do
 done
 echo "[OK] REMD production complete for all $REPLICAS replicas"
 
-# ── Finalize: re-link trajectories, export final PDB (mirrors STEP 10) ────────
-mkdir -p "${OUTDIR}/trajectories"
-for d in "${REPDIRS[@]}"; do
-  idx=$(basename "$d")                       # repNNN
-  src=$(readlink -f "$d/remd.xtc" 2>/dev/null || true)
-  [[ -n "$src" && -f "$src" ]] && ln -sf "$src" "${OUTDIR}/trajectories/remd_${idx}.xtc"
-done
-
+# ── Finalize: export final PDB (mirrors STEP 10) ─────────────────────────────
+# No trajectory re-linking: under the folder-symlink model remd.xtc is already at
+# prod/rep*/remd.xtc (real on scratch via the prod/ symlink, or real in OUTDIR).
 echo 0 | $GMX trjconv \
   -s "${PROD_DIR}/rep000/remd.tpr" \
   -f "${PROD_DIR}/rep000/remd.gro" \
@@ -138,6 +147,19 @@ echo "[CMD] bash ${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh $OUTDIR 000"
 bash "${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh" "$OUTDIR" 000 \
   || echo "[WARN] run_analysis.sh failed — re-run the command above"
 
+# ── Refresh the scratch archive (if the run was offloaded to scratch) ─────────
+# prod/ is a symlink into scratch when SYMLINK_BULK=1; recover SCRATCH_DIR as its
+# parent and re-copy the small OUTDIR dirs so the archive reflects the resumed run.
+# When prod/ is a real dir (SYMLINK_BULK=0), there is no scratch archive → skip.
+if [[ -L "${OUTDIR}/prod" ]]; then
+  SCRATCH_DIR="$(dirname "$(readlink -f "${OUTDIR}/prod")")"
+  echo "[CMD] bash ${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh $OUTDIR $SCRATCH_DIR"
+  bash "${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh" "$OUTDIR" "$SCRATCH_DIR" \
+    || echo "[WARN] finalize_outputs.sh failed — scratch archive may be incomplete; re-run the command above"
+else
+  SCRATCH_DIR=""
+fi
+
 echo ""
 echo "=========================================="
 echo "===== RESTART COMPLETED $(date) ====="
@@ -145,5 +167,6 @@ echo "=========================================="
 echo "[INFO] Output directory:  $OUTDIR"
 echo "[INFO] Restart mdrun log: $RESTART_LOG"
 echo "[INFO] Exchange log:      ${PROD_DIR}/rep000/remd.log"
+[[ -n "$SCRATCH_DIR" ]] && echo "[INFO] Scratch archive:   $SCRATCH_DIR"
 echo "[INFO] Processed traj:    ${OUTDIR}/analysis/remd_rep000_stripped_aligned.xtc"
 echo "=========================================="
