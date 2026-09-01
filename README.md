@@ -36,7 +36,7 @@ Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for *
 ## Prerequisites
 
 - GROMACS 2024.3 compiled with MPI + CUDA (see `scripts/installation/`)
-- A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `scripts/installation/environment.yml` — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
+- A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `scripts/installation/environment.yml`, with the `gromd_analysis` package installed into it — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
 - SLURM with GPU access
 
 T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GROMACS 2023.5 + PLUMED build** — the PLUMED hrex patch is broken on GROMACS 2024 (runs but silently gives zero exchanges), so REST2 uses its own build (`REST2_GMXRC` in `site_config.sh`; recipe in `scripts/installation/install_gromacs-2023.5-plumed.sh`). See `CLAUDE.md`.
@@ -55,10 +55,22 @@ T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GR
    ```bash
    bash scripts/installation/install_python_env.sh
    ```
-   This builds `groMD_env` from `scripts/installation/environment.yml`. The
-   pipeline activates it automatically for the post-analysis steps.
+   This builds `groMD_env` from `scripts/installation/environment.yml` **and**
+   installs the `gromd_analysis` package into it (editable), which is what puts
+   the `gromd-*` analysis commands on `PATH`. The pipeline activates the env
+   automatically for the post-analysis steps.
 
-3. That's it. The pipeline scripts source `site_config.sh` automatically.
+   If the env already exists, just add the package:
+   ```bash
+   conda activate groMD_env && pip install --no-deps -e .
+   ```
+
+3. **Check the install** (optional, seconds):
+   ```bash
+   conda activate groMD_env && pytest
+   ```
+
+4. That's it. The pipeline scripts source `site_config.sh` automatically.
 
 ---
 
@@ -188,7 +200,7 @@ auto-detects MD vs T-REMD vs REST2 from the job layout, so one command covers al
 # Directly (login node / interactive allocation):
 bash   scripts/analysis/run_analysis.sh    OUTDIR          # plain MD
 bash   scripts/analysis/run_analysis.sh    OUTDIR 000      # T-REMD / REST2, slot 000
-python scripts/analysis/remd_acceptance.py OUTDIR          # acceptance rates alone (target 20–30%)
+gromd-acceptance OUTDIR                                   # acceptance rates alone (target 20–30%)
 
 # As a SLURM job (long trajectories) — copy, set OUTDIR, run:
 cp example/submit_jobs/submit_analysis.sh my_analysis.sh
@@ -215,6 +227,14 @@ parameters — see `scripts/analysis/README.md`.
 ```
 gromacs_REMD/
 ├── site_config.sh              # Cluster-level settings (edit once)
+├── pyproject.toml              # Python package: gromd_analysis + the gromd-* commands
+├── gromd_analysis/             # The Python half of the analysis layer (installable)
+│   ├── layout.py                  # JobDir — parses OUTDIR into typed paths (gromd-layout)
+│   ├── xvg.py                     # .xvg parser + line plot     (gromd-plot-xvg)
+│   ├── dssp.py                    # secondary-structure map     (gromd-plot-dssp)
+│   ├── clustering.py              # conformational clustering   (gromd-cluster)
+│   ├── remd_log.py                # exchange acceptance rates   (gromd-acceptance)
+│   └── chains.py                  # per-chain .ndx groups       (gromd-chain-index)
 ├── scripts/
 │   ├── simulation/             # Simulation engines (do not edit)
 │   │   ├── REMD-gromacs.sbatch    # T-REMD engine
@@ -222,9 +242,10 @@ gromacs_REMD/
 │   │   ├── config_example.sh      # Job config template (copy and edit)
 │   │   ├── REMD-output-guide.md   # T-REMD output file reference
 │   │   └── MD-output-guide.md     # Plain-MD output file reference
-│   ├── analysis/               # Post-processing tools (see scripts/analysis/README.md)
+│   ├── analysis/               # GROMACS-driving shell steps (see scripts/analysis/README.md)
 │   │   ├── run_analysis.sh        # Whole post-analysis, re-runnable on a finished job
-│   │   └── analysis.sbatch        # Same, as a CPU-only SLURM job
+│   │   ├── analysis.sbatch        # Same, as a CPU-only SLURM job
+│   │   └── calc_traj_*.sh, fix_PBC*.sh, multichain_*.sh   # the gmx CLI steps
 │   └── installation/           # GROMACS + PLUMED build scripts
 └── example/
     ├── input_pdbs/             # Example protein structures

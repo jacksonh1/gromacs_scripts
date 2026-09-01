@@ -65,7 +65,7 @@ For a multi-chain complex, `-pbc mol` wraps each chain's COM into the box *indep
 
 ### GROMACS: distances are nm — convert to Å for analysis plots
 
-`gmx rms`, `gmx gyrate`, and `gmx rmsf` all write distances in **nm**; structural work expects ångström. `plot_xvg.py` converts any axis whose `.xvg` label carries an `nm` unit to Å (×10, label rewritten), leaving the underlying `.xvg` data in nm. If you add a new distance metric, confirm its plot reads in Å.
+`gmx rms`, `gmx gyrate`, and `gmx rmsf` all write distances in **nm**; structural work expects ångström. `gromd-plot-xvg` converts any axis whose `.xvg` label carries an `nm` unit to Å (×10, label rewritten), leaving the underlying `.xvg` data in nm. If you add a new distance metric, confirm its plot reads in Å.
 
 ### GROMACS: `gmx demux` is not for extracting constant-T ensembles
 
@@ -89,12 +89,12 @@ The install (`$HOME/opt/gromacs/2024.3-plumed/bin/`) ships a single binary, `gmx
 
 **Fix:** use the `GMX="${GMX:-gmx_mpi}"` pattern and call `$GMX mdrun` everywhere. (Both engines previously carried a dead `MDRUN="gmx mdrun"` variable that was never used and would fail here — it has been removed; don't reintroduce it.) The analysis scripts already probe `gmx_mpi` first, then fall back to `gmx`.
 
-### GROMACS: conformational clustering uses sklearn (`cluster_traj.py`), not `gmx cluster`
+### GROMACS: conformational clustering uses sklearn (`gromd-cluster`), not `gmx cluster`
 
-`gmx cluster` (gromos) builds the full pairwise-RMSD matrix → **O(N²)** in time and memory, which is impractical for the long production runs (25k+ frames). Conformational clustering is therefore done in `scripts/analysis/cluster_traj.py` (MDAnalysis + scikit-learn DBSCAN/k-means on flattened Cα coordinates), which scales: a 25k-frame run clusters in ~13 s. It runs in the **shared** part of `run_analysis.sh` (consumes `<prefix>_stripped_aligned.{xtc,gro}`), so it serves single- and multi-chain alike — no `multichain_*` variant.
+`gmx cluster` (gromos) builds the full pairwise-RMSD matrix → **O(N²)** in time and memory, which is impractical for the long production runs (25k+ frames). Conformational clustering is therefore done in `gromd_analysis/clustering.py` (the `gromd-cluster` entry point) (MDAnalysis + scikit-learn DBSCAN/k-means on flattened Cα coordinates), which scales: a 25k-frame run clusters in ~13 s. It runs in the **shared** part of `run_analysis.sh` (consumes `<prefix>_stripped_aligned.{xtc,gro}`), so it serves single- and multi-chain alike — no `multichain_*` variant.
 
 Things to keep straight:
-- **`--cutoff` is a real RMSD cutoff (nm)** only because the input frames are pre-aligned to one common reference, so flattened-coord Euclidean distance = `√N_atoms × RMSD`. The script sets DBSCAN `eps = cutoff_Å × √N_selected`. **If you ever feed `cluster_traj.py` an un-aligned trajectory, the cutoff stops meaning RMSD.** (This was a latent bug in the Amber `cluster_MD.py`, where `eps` was a raw flattened distance mislabelled "Å".)
+- **`--cutoff` is a real RMSD cutoff (nm)** only because the input frames are pre-aligned to one common reference, so flattened-coord Euclidean distance = `√N_atoms × RMSD`. The script sets DBSCAN `eps = cutoff_Å × √N_selected`. **If you ever feed `gromd-cluster` an un-aligned trajectory, the cutoff stops meaning RMSD.** (This was a latent bug in the Amber `cluster_MD.py`, where `eps` was a raw flattened distance mislabelled "Å".)
 - **Cluster count vs noise is controlled by `min_samples`** (the DBSCAN density knob), **not** a post-hoc population filter — the user rejected adding one. The default is **adaptive: `max(10, 1.5% of frames)`**, so a region must hold ~1.5% of the trajectory to be a state and the long tail of tiny clusters falls into noise (without it, a flexible system gave 80 clusters). Raise `--min-samples` for fewer; pass an absolute int to override. Tuned on the WW-domain REMD slots to keep even the most heterogeneous case to ≲10 clusters.
 - **Outputs go in a `clustering/` subdir** next to the prefix (`analysis/clustering/<prefix>_cluster_*`), not flat in `analysis/`.
 - **`-pbc cluster`** (the multi-chain periodic-image fix) is **unrelated** to this conformational clustering — different operation, despite the shared word. The multichain PBC scripts are deliberately not named `*cluster*`.
@@ -230,3 +230,32 @@ is entirely in the exit status.)
 **Fix / rule:** use a real `if` for conditional output near the end of a script, or append
 `|| true`. The same applies to any `((counter++))` (returns 1 when the pre-increment value
 is 0) or `grep -q` used as the final statement.
+
+### Python packaging: setuptools flat-layout auto-discovery fails in this repo
+
+`gromd_analysis/` sits at the repo root (flat layout, not `src/`). setuptools' automatic
+package discovery refuses to guess when the root holds several candidate directories, and
+this repo has `scripts/ example/ docs/ knowledgebase/ logs/` alongside the package. Without
+an explicit declaration `pip install -e .` dies at build time with:
+
+```
+error: Multiple top-level packages discovered in a flat-layout: [...]
+```
+
+**Fix:** `pyproject.toml` declares the package explicitly — do not remove this stanza, and
+add to it (rather than deleting it) if a second package is ever added:
+
+```toml
+[tool.setuptools]
+packages = ["gromd_analysis"]
+```
+
+Flat layout was chosen deliberately over `src/`: it makes `PYTHONPATH=<repo root>` a working
+no-install fallback on a node without network. `src/` would need `PYTHONPATH=<repo>/src`,
+which is easier to get wrong. The tradeoff `src/` normally buys — guaranteeing tests run
+against the *installed* package rather than the working copy — is worth nothing here, since
+the install is always editable and never a published wheel.
+
+Related: install with `pip install --no-deps -e .`. conda already provides
+matplotlib/numpy/MDAnalysis/scikit-learn from `environment.yml`; letting pip resolve them
+shadows the conda builds with wheels.

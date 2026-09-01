@@ -13,7 +13,7 @@
 #
 #   STRUCT        protein-only structure (.gro)
 #   TRAJ          protein-only trajectory (.xtc)
-#   NDX           index with the two chain groups (from multichain_chain_index.py)
+#   NDX           index with the two chain groups (from gromd-chain-index)
 #   GROUP1 GROUP2 chain group names, e.g. ChainA ChainB
 #   OUT           output .xvg (minimum distance vs time)
 # ─────────────────────────────────────────────────────────────────────────────

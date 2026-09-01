@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# plot_xvg.py — generic line plot for a GROMACS .xvg file
+# xvg.py — generic line plot for a GROMACS .xvg file
 # ─────────────────────────────────────────────────────────────────────────────
 # Trajectory-agnostic: reads the title and axis labels embedded in the .xvg
 # itself (the `@ title` / `@ xaxis label` / `@ yaxis label` grace directives),
@@ -11,7 +11,7 @@
 # legends from the xvg (`@ sN legend ...`) when present.
 #
 # Usage:
-#   python plot_xvg.py PLOT_XVG OUT_PNG
+#   gromd-plot-xvg PLOT_XVG OUT_PNG
 # ─────────────────────────────────────────────────────────────────────────────
 
 import argparse

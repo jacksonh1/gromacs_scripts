@@ -195,7 +195,7 @@ A plain-text record of all simulation parameters (force field, temperatures, tim
 |------|---------|
 | Check EM converged | `em/em.log` — look for `Fmax <` line |
 | Check density equilibration | `density/volume_seg*.xvg` |
-| Check REMD exchange rates | `python scripts/analysis/remd_acceptance.py OUTDIR` — outputs table + CSV |
+| Check REMD exchange rates | `gromd-acceptance OUTDIR` — outputs table + CSV |
 | Analyze lowest-T ensemble | `analysis/remd_rep000_stripped_aligned.xtc` (protein-only, aligned) + `analysis/remd_rep000_stripped_aligned.gro` |
 | RMSD / Rg / RMSF / DSSP | `analysis/remd_rep000_{rmsd,rg,rmsf,dssp}.*` |
 | Conformational states | `analysis/clustering/remd_rep000_cluster_summary.txt` + `remd_rep000_cluster_rep_c*.pdb` (representative structures); `_cluster_{populations,timeseries}.png`, `_cluster_assignments.csv` |

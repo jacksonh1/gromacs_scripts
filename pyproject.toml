@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gromd-analysis"
+version = "0.1.0"
+description = "Analysis tools for the GROMACS T-REMD / MD / REST2 pipelines"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Jack Halpin", email = "jhalpin@mit.edu" }]
+
+# Runtime deps of the Python half only. GROMACS itself is a site dependency
+# (site_config.sh / GMXRC) and is deliberately not expressed here — the package
+# version cannot pin the gmx build.
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "MDAnalysis",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+gromd-layout      = "gromd_analysis.layout:main"
+gromd-plot-xvg    = "gromd_analysis.xvg:main"
+gromd-plot-dssp   = "gromd_analysis.dssp:main"
+gromd-cluster     = "gromd_analysis.clustering:main"
+gromd-acceptance  = "gromd_analysis.remd_log:main"
+gromd-chain-index = "gromd_analysis.chains:main"
+
+# Flat layout: the package sits at the repo root alongside scripts/, example/,
+# docs/, knowledgebase/ and logs/. setuptools' flat-layout auto-discovery cannot
+# cope with that many top-level directories ("Multiple top-level packages
+# discovered"), so the package list is declared explicitly. Do not remove.
+[tool.setuptools]
+packages = ["gromd_analysis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -14,16 +14,18 @@
 #   REP      T-REMD replica slot to analyse (default 000; ignored for plain MD)
 #
 # Pipeline (MD or REMD):
-#   [REMD only] remd_acceptance.py                 — exchange acceptance rates
+#   [REMD only] gromd-acceptance                   — exchange acceptance rates
 #   PBC fix + strip + align → <prefix>_stripped_aligned.{xtc,gro}
 #   protein reference       → <prefix>_init.gro    — minimized RMSD reference
-#   calc_traj_rmsd/rg/rmsf/dssp + plot_xvg/plot_dssp   (whole protein/complex)
-#   cluster_traj.py                                — conformational clustering (Cα)
+#   calc_traj_rmsd/rg/rmsf/dssp + gromd-plot-xvg/-dssp   (whole protein/complex)
+#   gromd-cluster                                  — conformational clustering (Cα)
 #   [MD only] solvated snapshots → <OUTDIR>/solvated_snapshots/*.pdb
 #   [multi-chain only] per-chain RMSD/RMSF + inter-chain min distance
 #
-# Two auto-detections, so one command serves every job:
-#   - MD vs REMD     — from the job layout (prod/md.tpr vs prod/rep<REP>/remd.tpr).
+# Two auto-detections, so one command serves every job. Both live in
+# `gromd-layout` (gromd_analysis/layout.py), which parses OUTDIR into a JobDir:
+#   - MD vs REMD vs REST2 — from the job layout (prod/md.tpr vs prod/rep<REP>/remd.tpr
+#                      vs prod/rep<REP>/rest2.tpr).
 #   - chain count    — from the topology. 1 chain → the simple path (fix_PBC.sh /
 #                      extract_protein.sh). >1 chain → the multichain_* path, which
 #                      keeps the complex's chains in one periodic image (-pbc cluster)
@@ -45,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GMX_MAXBACKUP=-1
 
 # Activate the analysis/plotting Python env (matplotlib; needed by the plotters
-# and remd_acceptance.py). The per-metric calc scripts source GROMACS themselves.
+# and gromd-acceptance). The per-metric calc scripts source GROMACS themselves.
 SITE_CONFIG="${SCRIPT_DIR}/../../site_config.sh"
 if [[ -f "$SITE_CONFIG" ]]; then
   source "$SITE_CONFIG"
@@ -55,32 +57,16 @@ fi
 [[ -d "$OUTDIR" ]] || { echo "[ERROR] Not a directory: $OUTDIR"; exit 1; }
 
 # ── Auto-detect pipeline + resolve paths ──────────────────────────────────────
-ANALYSIS_DIR="${OUTDIR}/analysis"
-EM_GRO="${OUTDIR}/em/em.gro"
-EM_TPR="${OUTDIR}/em/em.tpr"
-
-if [[ -f "${OUTDIR}/prod/md.tpr" ]]; then
-  MODE="MD"
-  TPR="${OUTDIR}/prod/md.tpr"
-  XTC="${OUTDIR}/prod/md.xtc"
-  PREFIX="${ANALYSIS_DIR}/md"
-elif [[ -f "${OUTDIR}/prod/rep${REP}/remd.tpr" ]]; then
-  MODE="REMD"
-  TPR="${OUTDIR}/prod/rep${REP}/remd.tpr"
-  XTC="${OUTDIR}/prod/rep${REP}/remd.xtc"
-  PREFIX="${ANALYSIS_DIR}/remd_rep${REP}"
-elif [[ -f "${OUTDIR}/prod/rep${REP}/rest2.tpr" ]]; then
-  # REST2: rep000 is lambda=1 = the physical T_MIN ensemble. Analysis is identical
-  # to REMD's slot analysis (rep000 is the ensemble of interest); only the basename differs.
-  MODE="REST2"
-  TPR="${OUTDIR}/prod/rep${REP}/rest2.tpr"
-  XTC="${OUTDIR}/prod/rep${REP}/rest2.xtc"
-  PREFIX="${ANALYSIS_DIR}/rest2_rep${REP}"
-else
-  echo "[ERROR] Cannot find prod/md.tpr, prod/rep${REP}/remd.tpr, or prod/rep${REP}/rest2.tpr under $OUTDIR"
-  echo "        Is this a finished MD, T-REMD, or REST2 job directory?"
-  exit 1
-fi
+# gromd-layout parses the job directory into typed, existing paths — MD vs T-REMD
+# vs REST2 from the layout, protein chain count from the topology's [ molecules ]
+# section, plus the legacy trajectories/ fallback — and emits them as shell
+# assignments. It exits non-zero with an [ERROR] when this is not a finished job,
+# so a bad OUTDIR fails here instead of halfway through the metrics.
+#
+# Sets: MODE TPR XTC PREFIX NCHAINS ANALYSIS_DIR EM_GRO EM_TPR BUILD_DIR
+echo "[CMD] eval \"\$(gromd-layout $OUTDIR $REP)\""
+LAYOUT="$(gromd-layout "$OUTDIR" "$REP")" || exit 1
+eval "$LAYOUT"
 
 mkdir -p "$ANALYSIS_DIR"
 
@@ -90,44 +76,12 @@ echo "[INFO] TPR    : $TPR"
 echo "[INFO] XTC    : $XTC"
 echo "[INFO] PREFIX : $PREFIX"
 
-[[ -f "$TPR" ]]  || { echo "[ERROR] Run input not found: $TPR"; exit 1; }
-
-# Jobs run before the output restructure collected trajectories in a top-level
-# trajectories/ dir instead of leaving them in the stage dir. That dir is gone from
-# the current pipeline, but old job dirs (including the shipped example) still have
-# it, so accept it explicitly rather than failing. Announced loudly — this is a
-# legacy layout, not a search path.
-if [[ ! -e "$XTC" && -e "${OUTDIR}/trajectories/$(basename "$XTC")" ]]; then
-  XTC="${OUTDIR}/trajectories/$(basename "$XTC")"
-  echo "[INFO] Legacy layout: trajectory taken from trajectories/ → $XTC"
-fi
-
-# -e follows symlinks: under the folder-symlink model prod/ is a symlink into scratch
-# (SYMLINK_BULK=1), so the .xtc resolves through it; -e also works when prod/ is a real
-# dir (SYMLINK_BULK=0). A missing file means scratch was purged.
-[[ -e "$XTC" ]]  || { echo "[ERROR] Trajectory not found (scratch purged?): $XTC"; exit 1; }
-
 # ── REMD/REST2-only: exchange acceptance rates ────────────────────────────────
-# (remd_acceptance.py auto-detects the remd.log vs rest2.log basename.)
+# (gromd-acceptance auto-detects the remd.log vs rest2.log basename.)
 if [[ "$MODE" == "REMD" || "$MODE" == "REST2" ]]; then
-  echo "[CMD] python3 ${SCRIPT_DIR}/remd_acceptance.py $OUTDIR"
-  python3 "${SCRIPT_DIR}/remd_acceptance.py" "$OUTDIR" \
-    || echo "[WARN] remd_acceptance.py failed — re-run the command above"
-fi
-
-# ── Detect protein chain count (topology) → single- vs multi-chain path ───────
-# Count protein molecules in the system topology's [ molecules ] section. >1 chain
-# ⇒ the complex must be kept in one periodic image (the multichain_* pipeline).
-BUILD_DIR="${OUTDIR}/build"
-NCHAINS=1
-TOP=$(ls "${BUILD_DIR}"/*.top 2>/dev/null | head -1 || true)
-if [[ -n "$TOP" ]]; then
-  NCHAINS=$(awk '
-    /^[[:space:]]*\[/ { s=$0; gsub(/[][[:space:]]/,"",s); insec=(tolower(s)=="molecules"); next }
-    insec { line=$0; sub(/;.*/,"",line); n=split(line,a," ");
-            if (n>=2 && a[1] ~ /^Protein/) tot+=a[2] }
-    END { print (tot>0 ? tot : 1) }
-  ' "$TOP")
+  echo "[CMD] gromd-acceptance $OUTDIR"
+  gromd-acceptance "$OUTDIR" \
+    || echo "[WARN] gromd-acceptance failed — re-run the command above"
 fi
 
 # ── 1. PBC fix + strip + align (+ RMSD reference) → <prefix>_stripped_aligned.* ─
@@ -162,29 +116,29 @@ FIT="${PREFIX}_stripped_aligned.xtc"
 # ── 2. Metrics (on the stripped/aligned protein trajectory) + plots ───────────
 echo "[CMD] bash ${SCRIPT_DIR}/calc_traj_rmsd.sh $INIT_REF $FIT ${PREFIX}_rmsd.xvg"
 bash "${SCRIPT_DIR}/calc_traj_rmsd.sh" "$INIT_REF" "$FIT" "${PREFIX}_rmsd.xvg" \
-  && python3 "${SCRIPT_DIR}/plot_xvg.py" "${PREFIX}_rmsd.xvg" "${PREFIX}_rmsd.png" \
+  && gromd-plot-xvg "${PREFIX}_rmsd.xvg" "${PREFIX}_rmsd.png" \
   || echo "[WARN] RMSD step failed — re-run the commands above"
 
 echo "[CMD] bash ${SCRIPT_DIR}/calc_traj_rg.sh $REF $FIT ${PREFIX}_rg.xvg"
 bash "${SCRIPT_DIR}/calc_traj_rg.sh" "$REF" "$FIT" "${PREFIX}_rg.xvg" \
-  && python3 "${SCRIPT_DIR}/plot_xvg.py" "${PREFIX}_rg.xvg" "${PREFIX}_rg.png" \
+  && gromd-plot-xvg "${PREFIX}_rg.xvg" "${PREFIX}_rg.png" \
   || echo "[WARN] Rg step failed — re-run the commands above"
 
 echo "[CMD] bash ${SCRIPT_DIR}/calc_traj_rmsf.sh $REF $FIT ${PREFIX}_rmsf.xvg"
 bash "${SCRIPT_DIR}/calc_traj_rmsf.sh" "$REF" "$FIT" "${PREFIX}_rmsf.xvg" \
-  && python3 "${SCRIPT_DIR}/plot_xvg.py" "${PREFIX}_rmsf.xvg" "${PREFIX}_rmsf.png" \
+  && gromd-plot-xvg "${PREFIX}_rmsf.xvg" "${PREFIX}_rmsf.png" \
   || echo "[WARN] RMSF step failed — re-run the commands above"
 
 echo "[CMD] bash ${SCRIPT_DIR}/calc_traj_dssp.sh $REF $FIT ${PREFIX}_dssp.dat"
 bash "${SCRIPT_DIR}/calc_traj_dssp.sh" "$REF" "$FIT" "${PREFIX}_dssp.dat" \
-  && python3 "${SCRIPT_DIR}/plot_dssp.py" "${PREFIX}_dssp.dat" "${PREFIX}_dssp.png" \
+  && gromd-plot-dssp "${PREFIX}_dssp.dat" "${PREFIX}_dssp.png" \
   || echo "[WARN] DSSP step failed — re-run the commands above"
 
 # Conformational clustering (Cα-RMSD; sklearn DBSCAN). Runs on the same protein-only
 # aligned trajectory, so it serves single- and multi-chain alike. CLUSTER_CUTOFF is
-# the backbone-RMSD cutoff in nm (default 0.20 = 2.0 Å); see cluster_traj.py.
-echo "[CMD] python3 ${SCRIPT_DIR}/cluster_traj.py $REF $FIT ${PREFIX} --cutoff ${CLUSTER_CUTOFF:-0.20}"
-python3 "${SCRIPT_DIR}/cluster_traj.py" "$REF" "$FIT" "${PREFIX}" --cutoff "${CLUSTER_CUTOFF:-0.20}" \
+# the backbone-RMSD cutoff in nm (default 0.20 = 2.0 Å); see gromd_analysis/clustering.py.
+echo "[CMD] gromd-cluster $REF $FIT ${PREFIX} --cutoff ${CLUSTER_CUTOFF:-0.20}"
+gromd-cluster "$REF" "$FIT" "${PREFIX}" --cutoff "${CLUSTER_CUTOFF:-0.20}" \
   || echo "[WARN] clustering step failed — re-run the command above"
 
 # ── 3. Solvated snapshots (MD only) → <OUTDIR>/solvated_snapshots/ ────────────
@@ -208,9 +162,9 @@ if (( NCHAINS > 1 )); then
   echo ""
   echo "[INFO] Multi-chain extras (per-chain RMSD/RMSF + inter-chain distance)"
   NDX="${PREFIX}_chains.ndx"
-  echo "[CMD] python3 ${SCRIPT_DIR}/multichain_chain_index.py $BUILD_DIR $REF $NDX"
-  IDX_OUT=$(python3 "${SCRIPT_DIR}/multichain_chain_index.py" "$BUILD_DIR" "$REF" "$NDX" 2>&1) \
-    || echo "[WARN] multichain_chain_index.py failed"
+  echo "[CMD] gromd-chain-index $BUILD_DIR $REF $NDX"
+  IDX_OUT=$(gromd-chain-index "$BUILD_DIR" "$REF" "$NDX" 2>&1) \
+    || echo "[WARN] gromd-chain-index failed"
   echo "$IDX_OUT"
   CHAINS=( $(printf '%s\n' "$IDX_OUT" | sed -n 's/^CHAINS: //p') )
 
@@ -220,11 +174,11 @@ if (( NCHAINS > 1 )); then
       g="Chain${c}_Backbone"
       echo "[CMD] bash ${SCRIPT_DIR}/multichain_chain_rmsd.sh $INIT_REF $FIT $NDX $g ${PREFIX}_chain${c}_rmsd.xvg"
       bash "${SCRIPT_DIR}/multichain_chain_rmsd.sh" "$INIT_REF" "$FIT" "$NDX" "$g" "${PREFIX}_chain${c}_rmsd.xvg" \
-        && python3 "${SCRIPT_DIR}/plot_xvg.py" "${PREFIX}_chain${c}_rmsd.xvg" "${PREFIX}_chain${c}_rmsd.png" \
+        && gromd-plot-xvg "${PREFIX}_chain${c}_rmsd.xvg" "${PREFIX}_chain${c}_rmsd.png" \
         || echo "[WARN] chain ${c} RMSD failed"
       echo "[CMD] bash ${SCRIPT_DIR}/multichain_chain_rmsf.sh $REF $FIT $NDX $g ${PREFIX}_chain${c}_rmsf.xvg"
       bash "${SCRIPT_DIR}/multichain_chain_rmsf.sh" "$REF" "$FIT" "$NDX" "$g" "${PREFIX}_chain${c}_rmsf.xvg" \
-        && python3 "${SCRIPT_DIR}/plot_xvg.py" "${PREFIX}_chain${c}_rmsf.xvg" "${PREFIX}_chain${c}_rmsf.png" \
+        && gromd-plot-xvg "${PREFIX}_chain${c}_rmsf.xvg" "${PREFIX}_chain${c}_rmsf.png" \
         || echo "[WARN] chain ${c} RMSF failed"
     done
     # Inter-chain minimum distance for each unique chain pair (binding observable).
@@ -235,7 +189,7 @@ if (( NCHAINS > 1 )); then
         if (( n == 2 )); then out="${PREFIX}_interchain_mindist"; else out="${PREFIX}_interchain_${a}_${b}_mindist"; fi
         echo "[CMD] bash ${SCRIPT_DIR}/multichain_interchain_dist.sh $REF $FIT $NDX Chain${a} Chain${b} ${out}.xvg"
         bash "${SCRIPT_DIR}/multichain_interchain_dist.sh" "$REF" "$FIT" "$NDX" "Chain${a}" "Chain${b}" "${out}.xvg" \
-          && python3 "${SCRIPT_DIR}/plot_xvg.py" "${out}.xvg" "${out}.png" \
+          && gromd-plot-xvg "${out}.xvg" "${out}.png" \
           || echo "[WARN] inter-chain ${a}-${b} distance failed"
       done
     done

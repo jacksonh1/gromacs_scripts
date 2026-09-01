@@ -32,7 +32,30 @@ alternative that was rejected and why. Operational pitfalls live in `CLAUDE.md`
 
 ## Analysis
 
-- **Conformational clustering uses `cluster_traj.py` (sklearn DBSCAN on aligned
+- **The analysis layer is a hybrid: shell drives GROMACS, Python is an installable
+  package.** The split line is "does the step invoke `gmx`?" — the ~1200 lines of
+  `scripts/analysis/*.sh` stay shell; the ~1000 lines that never touch GROMACS moved
+  into `gromd_analysis/` (flat layout at the repo root) with `gromd-*` console
+  scripts. *Why not port the shell to Python:* every one of those steps is a `gmx`
+  CLI call with a stdin group selection, so a Python port would be `subprocess`
+  wrappers around the same commands — one more layer, and it would cost the property
+  that each step is echoed as a command you can paste and re-run by hand. *Why
+  package the Python:* the parsers were only reachable by `sys.path` hacks, so other
+  analyses re-implemented them from scratch (see
+  `RELE_simulations/2026-03-25/ai_analysis_test/`, ~1500 lines with hardcoded absolute
+  paths). *Why flat and not `src/`:* `PYTHONPATH=<repo root>` then works as a
+  no-install fallback; `src/` buys isolation that is worthless for an always-editable
+  install. See `GOTCHAS.md` for the auto-discovery trap this creates.
+
+- **`JobDir` (`gromd_analysis/layout.py`) is the one place that knows the output
+  layout.** `run_analysis.sh` gets `MODE/TPR/XTC/PREFIX/NCHAINS/...` from
+  `eval "$(gromd-layout OUTDIR REP)"` rather than re-deriving them in bash. *Why:*
+  the engine/chain-count detection was ~60 lines of shell that every other consumer
+  had to duplicate. `JobDir.detect` parses rather than validates — it returns a
+  `JobDir` whose paths all exist, or raises `JobLayoutError`; there is no
+  half-resolved state to hand downstream.
+
+- **Conformational clustering uses `gromd-cluster` (`gromd_analysis/clustering.py`; sklearn DBSCAN on aligned
   Cα), not `gmx cluster`.** *Why:* gmx cluster builds the full O(N²) pairwise-RMSD
   matrix — impractical for 25k+ frame production runs. DBSCAN on flattened aligned
   coords scales (~13 s for 25k frames). See `[[reference_clustering]]` /
@@ -48,6 +71,19 @@ alternative that was rejected and why. Operational pitfalls live in `CLAUDE.md`
   holds per-pair acceptance rates + counts.
 
 ## Robustness
+
+- **The exchange-statistics block parses into `ExchangeStats`, not a dict.** It was a
+  7-key dict that `main()` then mutated with two more keys from a second parser before
+  handing it to `report()` 130 lines away. *Why:* the shape is fixed and matters, so it
+  belongs in a frozen dataclass with the units and per-pair semantics documented on the
+  fields (repo rule: dataclasses, not raw dicts). The two parsers merged into one
+  `ExchangeStats.parse`, which also asserts the real invariant the dict version let slide
+  — the per-pair lists must have length `n_replicas - 1`, or a truncated block silently
+  yields a short table. Parsers raise `RemdLogError` rather than calling `sys.exit`, so
+  they are usable as a library; `main()` is the only place that turns that into an exit
+  code (same split as `JobLayoutError`). Verified behaviour-preserving: byte-identical
+  `remd_acceptance.csv` on all three shipped REMD/REST2 examples.
+
 
 - **Parameters validated fail-loud at STEP 1** (`validate_params.py`): unknown
   config keys rejected as typos, required/type/range checked on resolved values.

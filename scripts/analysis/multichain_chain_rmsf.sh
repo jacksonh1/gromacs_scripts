@@ -11,7 +11,7 @@
 #
 #   STRUCT  protein-only structure (.gro); topology / averaging reference
 #   TRAJ    protein-only trajectory (.xtc), PBC-fixed and aligned
-#   NDX     index file with the chain backbone group (from multichain_chain_index.py)
+#   NDX     index file with the chain backbone group (from gromd-chain-index)
 #   GROUP   chain backbone group name, e.g. ChainA_Backbone
 #   OUT     output .xvg
 # ─────────────────────────────────────────────────────────────────────────────

@@ -79,6 +79,21 @@ Solutions should work for 8, 48, or 128 replicas without special-casing. Prefer 
 
 ---
 
+## Tests
+
+`pytest` from the repo root (in `groMD_env`). `tests/` covers the **Python** half only —
+the parsers in `gromd_analysis/`: `.xvg`, topology sections, `JobDir.detect` (all three
+engines + failure modes), the replica-exchange statistics block, DSSP. Fixtures are
+synthesized in `tmp_path`; **no test may read `example/outputs/`** — it is `.gitignore`d and
+its bulk stage dirs are scratch symlinks that get purged (a shipped example directory
+disappeared mid-session once). When you touch a parser, add or update its test.
+
+The `.sh` steps are not unit-tested — verify them by running `run_analysis.sh` on a finished
+job and diffing the outputs against the previous run. That is the regression check for
+anything touching the GROMACS path.
+
+---
+
 ## Code style: fail loudly
 
 This project follows a "fail loudly" philosophy. Bugs that crash immediately are strongly preferred over bugs that silently produce wrong results.
@@ -132,12 +147,12 @@ caused a failure — add its detail to `GOTCHAS.md` immediately AND add a one-li
 - **Bash: `bash -n` does not catch `set -u` unbound variables** — after deleting a var's assignment, `grep` the script for remaining references; a dangling `${VAR}` crashes at runtime (often in a late summary line, *after* the real work).
 - **GROMACS: `-pbc mol`/`-pbc whole` split multi-chain complexes** — neither keeps chains in the same image; multi-chain has a separate `multichain_*` pipeline using `-pbc cluster` (auto-selected). `-pbc cluster` ≠ conformational clustering.
 - **GROMACS: `gmx rms` does not make its reference whole** — a PBC-broken reference silently inflates *every* RMSD (near-constant offset, doesn't start at ~0); extract the ref with `-pbc whole`.
-- **GROMACS: distances are nm — convert to Å for analysis plots** — `gmx rms`/`gyrate`/`rmsf` write nm; `plot_xvg.py` converts nm-labelled axes to Å. Confirm any new distance metric reads in Å.
+- **GROMACS: distances are nm — convert to Å for analysis plots** — `gmx rms`/`gyrate`/`rmsf` write nm; `gromd-plot-xvg` converts nm-labelled axes to Å. Confirm any new distance metric reads in Å.
 - **GROMACS: `gmx demux` is not for extracting constant-T ensembles** — it follows a configuration through temperature space; use the slot trajectory (`rep000/remd.xtc`) directly.
 - **GROMACS: REMD acceptance rates are pre-computed in the log** — parse the `Replica exchange statistics` block at the end; don't recount per-frame `Repl ex` lines.
 - **GROMACS: the Empirical Transition Matrix is not dwell time** — it's one-step transition probabilities between slots, not time-per-temperature.
 - **GROMACS: this build provides only `gmx_mpi`** — there is no `gmx`/`gmx mdrun`; use the `GMX="${GMX:-gmx_mpi}"` pattern and `$GMX mdrun` everywhere.
-- **GROMACS: conformational clustering uses sklearn (`cluster_traj.py`), not `gmx cluster`** (O(N²)) — `--cutoff` means RMSD only because inputs are pre-aligned; `min_samples` (adaptive) controls cluster-vs-noise.
+- **GROMACS: conformational clustering uses sklearn (`gromd-cluster`), not `gmx cluster`** (O(N²)) — `--cutoff` means RMSD only because inputs are pre-aligned; `min_samples` (adaptive) controls cluster-vs-noise.
 - **Per-job parameters are validated at STEP 1 (`validate_params.py`)** — three lists must stay in sync when adding/renaming a param (engine default read, `export` list, allowlist+rules); stdlib-only; derive step counts *after* the validator.
 - **GROMACS: short `REPLEX_PS` (<1 ps) deadlocks GPU-resident REMD** — MPI collective hang at exchange with clean physics; keep `REPLEX_PS ≥ 1.0` (or add `-update cpu`).
 - **SLURM/GROMACS: `gmx_mpi` needs `libhcoll`/`libocoms`** — missing on some `mit_normal_gpu` nodes → instant "cannot open shared object" death; stage the libs + prepend `LD_LIBRARY_PATH`, and add `#SBATCH -C rocky8`.
@@ -153,4 +168,5 @@ caused a failure — add its detail to `GOTCHAS.md` immediately AND add a one-li
 - **GROMACS: `gmx select` names a selection with a LEADING QUOTED STRING** — `'"Shell" group "Protein" ...'`, not `'Shell = ...'` (that declares a *variable* → "Too few selections provided"). Dynamic selections also get `_f0_t<time>` appended in the `-on` ndx, so select the group by **index 0**, not by name.
 - **Bash: a `[[ … ]] && echo` as the LAST line of a `set -e` script exits 1** — a false test makes SLURM report a successful job as FAILED; use a real `if` (also applies to `((n++))` / `grep -q` as the final statement).
 - **GROMACS: never parse a progress readout — `gmx check`'s `Last frame` is throttled AND carriage-return drawn** — on a long trajectory it is never printed at all (2501 frames → stopped at "Reading frame 2000", exit 0), so the parse fails for *some* inputs only. Get the last frame time from the `.gro` title of `trjconv -dump 999999999` instead.
+- **Python packaging: setuptools flat-layout auto-discovery fails here** — `gromd_analysis/` is at the repo root next to `scripts/ example/ docs/ knowledgebase/ logs/`, so `pip install -e .` dies with "Multiple top-level packages discovered" unless `pyproject.toml` keeps its explicit `[tool.setuptools] packages = ["gromd_analysis"]`. Install with `--no-deps` (conda owns the scientific deps); `PYTHONPATH=<repo root>` is the no-install fallback.
 - **GROMACS: CHARMM force fields need force-switched vdW (not the AMBER plain cutoff)** — CHARMM36m requires `vdw-modifier=force-switch`, `rvdw-switch=1.0`, `rvdw=rcoulomb=1.2`, `DispCorr=no`; the AMBER cutoff mdp runs but is silently wrong. Selected per job via `FF=charmm36m` (mdp auto-gated on `FF==charmm*`, forces `CUTOFF_NM=1.2`, AMBER path byte-identical). FF is the MacKerell **force-switch** port at `$HOME/opt/gromacs/ff/charmm36m.ff` (found via `GMXLIB` in `site_config.sh`; not the `ljpme` port); `WATER=tip3p` auto-resolves to CHARMM-modified TIP3P inside the FF dir. Water always follows the force field — never cross them.

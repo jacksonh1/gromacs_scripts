@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-remd_acceptance.py — Exchange acceptance rates for a GROMACS T-REMD run.
+remd_log.py — Exchange acceptance rates for a GROMACS T-REMD run.
 
 Parses the "Replica exchange statistics" block from the GROMACS log and reports
 per-pair empirical acceptance rates, mean Metropolis probabilities, and exchange
 counts.
 
 Usage:
-    python remd_acceptance.py OUTDIR [--rep REP] [--plot]
+    gromd-acceptance OUTDIR [--rep REP] [--plot]
 
     OUTDIR   path to the job output directory (contains prod/, analysis/)
     --rep    replica log to parse (default: 000; any log works — all replicas
@@ -19,62 +19,104 @@ import argparse
 import csv
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
-def parse_header(log_text):
-    m = re.search(r'There are (\d+) replicas', log_text)
-    if not m:
-        sys.exit("[ERROR] Could not find replica count in log.")
-    n_replicas = int(m.group(1))
-
-    m = re.search(r'Replica exchange interval:\s+(\d+)', log_text)
-    if not m:
-        sys.exit("[ERROR] Could not find exchange interval in log.")
-    replex_interval = int(m.group(1))
-
-    return {'n_replicas': n_replicas, 'replex_interval': replex_interval}
+class RemdLogError(Exception):
+    """The log is not a finished replica-exchange run, or its statistics block is unparseable."""
 
 
-def parse_stats_block(log_text):
-    m = re.search(r'(\d+) attempts, (\d+) odd, (\d+) even', log_text)
-    if not m:
-        sys.exit(
-            "[ERROR] No 'Replica exchange statistics' block found.\n"
-            "        Has the simulation completed?"
+@dataclass(frozen=True)
+class ExchangeStats:
+    """The `Replica exchange statistics` block, parsed.
+
+    GROMACS pre-computes these at the end of the run — per-pair acceptance rates
+    and counts are read straight out of the block, never recounted from per-frame
+    `Repl ex` lines.
+
+    The four per-pair lists are parallel and all have length `n_replicas - 1`
+    (one entry per neighbouring temperature pair): pair `i` is slot `i` ↔ `i+1`.
+    """
+
+    n_replicas: int
+    replex_interval: int          # exchange attempt interval, in steps
+    total_attempts: int
+    n_odd: int                    # attempts on odd-type steps
+    n_even: int                   # attempts on even-type steps
+    avg_prob: list[float]         # per pair: mean Metropolis probability
+    n_exchanges: list[int]        # per pair: accepted exchanges
+    acceptance_rate: list[float]  # per pair: empirical rate (avg number of exchanges)
+    attempts_per_pair: list[int]  # per pair: attempts of that pair's parity
+
+    @property
+    def n_pairs(self) -> int:
+        return len(self.acceptance_rate)
+
+    @classmethod
+    def parse(cls, log_text: str) -> "ExchangeStats":
+        """Parse a replica log, or raise RemdLogError. Any replica's log will do —
+        every replica records the same statistics block."""
+        n_replicas = _search_int(
+            r'There are (\d+) replicas', log_text, "replica count")
+        replex_interval = _search_int(
+            r'Replica exchange interval:\s+(\d+)', log_text, "exchange interval")
+
+        m = re.search(r'(\d+) attempts, (\d+) odd, (\d+) even', log_text)
+        if not m:
+            raise RemdLogError(
+                "No 'Replica exchange statistics' block found. Has the simulation completed?")
+        total, n_odd, n_even = (int(g) for g in m.groups())
+
+        avg_prob = _parse_section('average probabilities', log_text)
+        n_exc    = _parse_section('number of exchanges', log_text)
+        avg_exc  = _parse_section('average number of exchanges', log_text)
+
+        # N replicas ⇒ N-1 neighbouring pairs. A mismatch means the block was
+        # truncated or the format changed; either way the per-pair table below
+        # would be silently wrong, so fail here instead.
+        for label, values in (('average probabilities', avg_prob),
+                              ('number of exchanges', n_exc),
+                              ('average number of exchanges', avg_exc)):
+            if len(values) != n_replicas - 1:
+                raise RemdLogError(
+                    f"'{label}' has {len(values)} values, expected {n_replicas - 1} "
+                    f"for {n_replicas} replicas.")
+
+        # Pair i is attempted on even-type steps (n_even attempts) if i is even,
+        # odd-type steps (n_odd attempts) if i is odd.
+        attempts = [n_even if i % 2 == 0 else n_odd for i in range(len(n_exc))]
+
+        return cls(
+            n_replicas=n_replicas,
+            replex_interval=replex_interval,
+            total_attempts=total,
+            n_odd=n_odd,
+            n_even=n_even,
+            avg_prob=avg_prob,
+            n_exchanges=[int(x) for x in n_exc],
+            acceptance_rate=avg_exc,
+            attempts_per_pair=attempts,
         )
-    total = int(m.group(1))
-    n_odd  = int(m.group(2))
-    n_even = int(m.group(3))
 
-    def parse_section(label):
-        # Match: "Repl  <label>:\n" + index line + values line
-        pat = re.compile(
-            rf'Repl\s+{re.escape(label)}:\s*\nRepl[^\n]+\nRepl\s+([\d. ]+)',
-            re.MULTILINE,
-        )
-        match = pat.search(log_text)
-        if not match:
-            sys.exit(f"[ERROR] Could not parse '{label}' section from log.")
-        return [float(v) for v in match.group(1).split()]
 
-    avg_prob = parse_section('average probabilities')
-    n_exc    = parse_section('number of exchanges')
-    avg_exc  = parse_section('average number of exchanges')
+def _search_int(pattern: str, log_text: str, what: str) -> int:
+    m = re.search(pattern, log_text)
+    if not m:
+        raise RemdLogError(f"Could not find {what} in log.")
+    return int(m.group(1))
 
-    # Pair i is attempted on even-type steps (n_even attempts) if i is even,
-    # odd-type steps (n_odd attempts) if i is odd.
-    attempts = [n_even if i % 2 == 0 else n_odd for i in range(len(n_exc))]
 
-    return {
-        'total_attempts': total,
-        'n_odd':  n_odd,
-        'n_even': n_even,
-        'avg_prob':        avg_prob,
-        'n_exchanges':     [int(x) for x in n_exc],
-        'acceptance_rate': avg_exc,
-        'attempts_per_pair': attempts,
-    }
+def _parse_section(label: str, log_text: str) -> list[float]:
+    """Values from one `Repl  <label>:` section: label line, index line, value line."""
+    pat = re.compile(
+        rf'Repl\s+{re.escape(label)}:\s*\nRepl[^\n]+\nRepl\s+([\d. ]+)',
+        re.MULTILINE,
+    )
+    match = pat.search(log_text)
+    if not match:
+        raise RemdLogError(f"Could not parse '{label}' section from log.")
+    return [float(v) for v in match.group(1).split()]
 
 
 def prod_basename(outdir):
@@ -84,7 +126,7 @@ def prod_basename(outdir):
     for base in ('remd', 'rest2'):
         if (Path(outdir) / 'prod' / 'rep000' / f'{base}.log').exists():
             return base
-    sys.exit(f"[ERROR] no prod/rep000/{{remd,rest2}}.log under {outdir}")
+    raise RemdLogError(f"no prod/rep000/{{remd,rest2}}.log under {outdir}")
 
 
 def get_temperatures(outdir, n_replicas, basename):
@@ -92,7 +134,7 @@ def get_temperatures(outdir, n_replicas, basename):
     for i in range(n_replicas):
         log_path = Path(outdir) / 'prod' / f'rep{i:03d}' / f'{basename}.log'
         if not log_path.exists():
-            sys.exit(f"[ERROR] Replica log not found: {log_path}")
+            raise RemdLogError(f"Replica log not found: {log_path}")
         # Temperature appears in the mdp parameters section near the top of the log.
         # Read in chunks to avoid loading multi-GB files fully into memory.
         header_text = []
@@ -104,17 +146,22 @@ def get_temperatures(outdir, n_replicas, basename):
         text = ''.join(header_text)
         m = re.search(r'ensemble-temperature\s*=\s*([\d.]+)', text)
         if not m:
-            sys.exit(f"[ERROR] ensemble-temperature not found in {log_path}")
+            raise RemdLogError(f"ensemble-temperature not found in {log_path}")
         temps.append(float(m.group(1)))
     return temps
 
 
-def report(stats, temps, outdir, plot):
-    n_pairs = len(stats['acceptance_rate'])
-    rates   = stats['acceptance_rate']
-    probs   = stats['avg_prob']
-    n_exc   = stats['n_exchanges']
-    atts    = stats['attempts_per_pair']
+def report(stats: ExchangeStats, temps, outdir, plot):
+    # ASSUMES: temps is per-slot, so the pair table can index temps[i] and temps[i+1].
+    if len(temps) != stats.n_replicas:
+        raise RemdLogError(
+            f"got {len(temps)} temperatures for {stats.n_replicas} replicas.")
+
+    n_pairs = stats.n_pairs
+    rates   = stats.acceptance_rate
+    probs   = stats.avg_prob
+    n_exc   = stats.n_exchanges
+    atts    = stats.attempts_per_pair
 
     # ── Console table ─────────────────────────────────────────────────────────
     hdr = (
@@ -124,9 +171,9 @@ def report(stats, temps, outdir, plot):
     print()
     print(
         f"REMD exchange acceptance rates"
-        f"  ({stats['n_replicas']} replicas,"
-        f" {stats['total_attempts']} attempts:"
-        f" {stats['n_odd']} odd, {stats['n_even']} even)"
+        f"  ({stats.n_replicas} replicas,"
+        f" {stats.total_attempts} attempts:"
+        f" {stats.n_odd} odd, {stats.n_even} even)"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -210,20 +257,17 @@ def main():
     )
     args = ap.parse_args()
 
-    basename = prod_basename(args.outdir)
-    log_path = Path(args.outdir) / 'prod' / f'rep{args.rep}' / f'{basename}.log'
-    if not log_path.exists():
-        sys.exit(f"[ERROR] Log not found: {log_path}")
+    try:
+        basename = prod_basename(args.outdir)
+        log_path = Path(args.outdir) / 'prod' / f'rep{args.rep}' / f'{basename}.log'
+        if not log_path.exists():
+            raise RemdLogError(f"Log not found: {log_path}")
 
-    log_text = log_path.read_text(errors='replace')
-
-    header = parse_header(log_text)
-    stats  = parse_stats_block(log_text)
-    stats['n_replicas']     = header['n_replicas']
-    stats['replex_interval'] = header['replex_interval']
-
-    temps = get_temperatures(args.outdir, header['n_replicas'], basename)
-    report(stats, temps, args.outdir, args.plot)
+        stats = ExchangeStats.parse(log_path.read_text(errors='replace'))
+        temps = get_temperatures(args.outdir, stats.n_replicas, basename)
+        report(stats, temps, args.outdir, args.plot)
+    except RemdLogError as exc:
+        sys.exit(f"[ERROR] {exc}")
 
 
 if __name__ == '__main__':

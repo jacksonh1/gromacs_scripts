@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# multichain_chain_index.py — build a protein-only index with per-chain groups
+# chains.py — build a protein-only index with per-chain groups
 # ─────────────────────────────────────────────────────────────────────────────
 # Owns all chain logic for the multi-chain analysis pipeline. From the system
 # topology it determines the ordered protein chains and their atom counts, then —
@@ -18,7 +18,7 @@
 # reference and the stripped/aligned trajectory.
 #
 # Usage:
-#   python3 multichain_chain_index.py BUILD_DIR PROTEIN_GRO OUT_NDX
+#   gromd-chain-index BUILD_DIR PROTEIN_GRO OUT_NDX
 #
 #   BUILD_DIR    the job's build/ directory (holds <base>.top + chain *.itp)
 #   PROTEIN_GRO  protein-only structure (e.g. <prefix>_stripped_aligned.gro)
@@ -130,7 +130,7 @@ def write_ndx(path: Path, groups: dict[str, list[int]]) -> None:
 
 def main() -> None:
     if len(sys.argv) != 4:
-        sys.exit("Usage: python3 multichain_chain_index.py BUILD_DIR PROTEIN_GRO OUT_NDX")
+        sys.exit("Usage: gromd-chain-index BUILD_DIR PROTEIN_GRO OUT_NDX")
     build_dir, protein_gro, out_ndx = (Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
 
     tops = list(build_dir.glob("*.top"))

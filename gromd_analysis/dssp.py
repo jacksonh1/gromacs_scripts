@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# plot_dssp.py — secondary-structure map (residue × frame) from gmx dssp output
+# dssp.py — secondary-structure map (residue × frame) from gmx dssp output
 # ─────────────────────────────────────────────────────────────────────────────
 # Trajectory-agnostic: renders the .dat written by `gmx dssp -o` for either the
 # plain-MD or T-REMD pipeline. The .dat has one row per frame, each row a string
@@ -10,7 +10,7 @@
 # secondary-structure type, with a legend.
 #
 # Usage:
-#   python plot_dssp.py DSSP_DAT OUT_PNG
+#   gromd-plot-dssp DSSP_DAT OUT_PNG
 # ─────────────────────────────────────────────────────────────────────────────
 
 import argparse

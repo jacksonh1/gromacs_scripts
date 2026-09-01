@@ -14,7 +14,7 @@
 #
 # Uses gmx dssp (built into GROMACS 2023+, no external dssp binary needed).
 # Hydrogens come from the structure (-hmode gromacs); the protein-only GRO from
-# pdb2gmx already has them. Render with plot_dssp.py.
+# pdb2gmx already has them. Render with gromd-plot-dssp.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail

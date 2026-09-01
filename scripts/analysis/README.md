@@ -19,6 +19,75 @@ between them is *where files live* (`prod/rep000/remd.*` vs `prod/md.*`).
 The single exception is `fix_PBC_strip_align.sh`, the orchestrator: it is the
 one place that encodes the `<prefix>_pbc.xtc` intermediate naming convention.
 
+## Design: shell drives GROMACS, Python does the rest
+
+The analysis layer is split along one line — **does the step invoke `gmx`?**
+
+- **Shell (`scripts/analysis/*.sh`)** — every step that drives the GROMACS CLI:
+  PBC correction, stripping, alignment, `gmx rms` / `gyrate` / `rmsf` / `dssp`,
+  solvated-snapshot extraction. These stay as shell because they *are* `gmx`
+  invocations with stdin group selections; wrapping them in `subprocess` would
+  add a layer and cost the property that every step is echoed as a command you
+  can paste and re-run by hand.
+- **Python (`gromd_analysis/`, at the repo root)** — everything that never touches
+  GROMACS: parsers, clustering, plotting, job-directory detection. This half is an
+  installable package, so it is importable from notebooks and other repos instead of
+  being copy-pasted or re-implemented.
+
+| command | module | does |
+|---|---|---|
+| `gromd-layout` | `layout.py` | parse OUTDIR → `JobDir` (mode, tpr, xtc, prefix, chain count) |
+| `gromd-plot-xvg` | `xvg.py` | parse + plot any GROMACS `.xvg` |
+| `gromd-plot-dssp` | `dssp.py` | secondary-structure map |
+| `gromd-cluster` | `clustering.py` | conformational clustering (sklearn) |
+| `gromd-acceptance` | `remd_log.py` | REMD/REST2 exchange acceptance rates |
+| `gromd-chain-index` | `chains.py` | per-chain `.ndx` groups from the topology |
+
+Install (once, into the analysis env — `install_python_env.sh` does this for you):
+
+```bash
+conda activate groMD_env && pip install --no-deps -e .   # from the repo root
+```
+
+`--no-deps` because conda already provides matplotlib/numpy/MDAnalysis/scikit-learn
+from `environment.yml`; pip must not reinstall and shadow them. On a node without
+network, `PYTHONPATH=<repo root>` makes `import gromd_analysis` work with no install
+(the package uses a flat layout for exactly this reason) — but the `gromd-*` commands
+need the install.
+
+### Library use
+
+`JobDir` is the entry point for any one-off analysis, so a notebook never has to
+hardcode `prod/rep000/remd.xtc` or re-derive the chain count:
+
+```python
+from pathlib import Path
+from gromd_analysis import JobDir, parse_xvg
+
+job = JobDir.detect(Path("example/outputs/output_T-REMD/<run>"))
+job.mode, job.n_chains, job.xtc          # ('REMD', 1, PosixPath('.../prod/rep000/remd.xtc'))
+rmsd = parse_xvg(Path(f"{job.prefix}_rmsd.xvg"))   # prefix is a stem, not a file
+```
+
+`JobDir.detect` either returns a `JobDir` whose paths all exist, or raises
+`JobLayoutError` — it never hands back a half-resolved directory.
+
+### Tests
+
+```bash
+conda activate groMD_env && pytest        # from the repo root
+```
+
+`tests/` covers the parsers — `.xvg` (including the nm→Å relabelling), the topology
+`[ molecules ]` / `[ moleculetype ]` sections, `JobDir.detect` for all three engines
+plus its failure modes, the replica-exchange statistics block, and the DSSP reader.
+Every fixture is synthesized in `tmp_path`; **no test reads `example/outputs/`**,
+which is `.gitignore`d and whose bulk stage dirs are scratch symlinks that get purged.
+
+Only the GROMACS-free code is covered. The `.sh` steps are verified by running
+`run_analysis.sh` on a finished job and diffing the outputs — the shipped examples
+are there for exactly that.
+
 ---
 
 ## Trajectory preparation
@@ -190,9 +259,9 @@ To instead measure frame-to-frame drift during the run, pass `<prefix>_stripped_
 Decoupled from computation — they render data files already on disk, so you can
 re-plot/restyle without re-running `gmx`. Require `matplotlib`.
 
-### `plot_xvg.py` — generic line plot
+### `gromd-plot-xvg` — generic line plot
 ```
-python plot_xvg.py PLOT_XVG OUT_PNG
+gromd-plot-xvg PLOT_XVG OUT_PNG
 ```
 Reads the title and axis labels embedded in the `.xvg` (`@ title` / `@ xaxis
 label` / `@ yaxis label`) and plots every data column against column 0. Serves
@@ -202,9 +271,9 @@ GROMACS writes distances in nm; any axis labelled in `nm` is converted to **ång
 (×10, label rewritten to `Å`) so the plots read in the units expected for structural
 work. The underlying `.xvg` data files are left in nm.
 
-### `plot_dssp.py` — secondary-structure map
+### `gromd-plot-dssp` — secondary-structure map
 ```
-python plot_dssp.py DSSP_DAT OUT_PNG
+gromd-plot-dssp DSSP_DAT OUT_PNG
 ```
 Renders the `gmx dssp` `.dat` as a residue × frame categorical heatmap with a
 legend. Colours are a fixed semantic palette (helices in blues/purple, strands in
@@ -213,9 +282,9 @@ across runs and structured regions stand out against the loopy background.
 
 ---
 
-## Conformational clustering: `cluster_traj.py`
+## Conformational clustering: `gromd-cluster`
 ```
-python cluster_traj.py STRUCT TRAJ OUT_PREFIX [--method dbscan|kmeans]
+gromd-cluster STRUCT TRAJ OUT_PREFIX [--method dbscan|kmeans]
     [--cutoff NM] [--min-samples N] [--n-clusters K] [--selection SEL] [--stride N]
 ```
 Groups the sampled frames into discrete conformational states (Cα clustering) and
@@ -225,7 +294,7 @@ pipelines and runs once in the shared part of `run_analysis.sh` (no multi-chain 
 
 **Why not `gmx cluster`.** The gromos algorithm builds the full pairwise-RMSD matrix —
 **O(N²)** in time and memory, impractical for the long production runs (25k+ frames).
-`cluster_traj.py` clusters on flattened Cα coordinates with scikit-learn, which scales:
+`gromd-cluster` clusters on flattened Cα coordinates with scikit-learn, which scales:
 a 25k-frame run clusters in ~13 s. `-pbc cluster` in the multi-chain pipeline is a
 *periodic-image* operation and is **unrelated** to this conformational clustering.
 
@@ -266,9 +335,9 @@ adaptive `min_samples` applies automatically.
 
 ---
 
-## `remd_acceptance.py` — exchange acceptance rates (REMD only)
+## `gromd-acceptance` — exchange acceptance rates (REMD only)
 ```
-python remd_acceptance.py OUTDIR [--rep REP] [--plot]
+gromd-acceptance OUTDIR [--rep REP] [--plot]
 ```
 Parses the "Replica exchange statistics" block from the GROMACS log (pre-computed
 by GROMACS at the end of each run) and reports per-pair empirical acceptance
@@ -357,7 +426,7 @@ per-frame (REMD-safe) and, for a single chain, byte-identical to `-pbc whole`.
 
 > **Naming:** these scripts are `multichain_*` and use `-pbc cluster` only as a
 > *periodic-image* fix. That is unrelated to **conformational clustering**, which lives
-> in `cluster_traj.py` (sklearn DBSCAN, see above) — not `gmx cluster`. The PBC scripts
+> in `gromd-cluster` (sklearn DBSCAN, see above) — not `gmx cluster`. The PBC scripts
 > are deliberately *not* named `*cluster*` to keep that distinction clear.
 
 The multi-chain scripts (mirror their single-chain counterparts):
@@ -368,7 +437,7 @@ The multi-chain scripts (mirror their single-chain counterparts):
 | `multichain_fix_PBC_strip_align.sh` | `fix_PBC_strip_align.sh` | orchestrator (reuses `strip_and_align_trajectory.sh`) |
 | `multichain_extract_protein.sh` | `extract_protein.sh` | RMSD reference via `-pbc cluster` |
 | `multichain_extract_solvated_snapshots.sh` | `extract_solvated_snapshots.sh` | solvated snapshot PDBs, chains kept in one image |
-| `multichain_chain_index.py` | — | chain detector + index builder (per-chain + per-chain-backbone groups) |
+| `gromd-chain-index` | — | chain detector + index builder (per-chain + per-chain-backbone groups) |
 | `multichain_chain_rmsd.sh` | `calc_traj_rmsd.sh` | one chain's backbone RMSD, fit to itself |
 | `multichain_chain_rmsf.sh` | `calc_traj_rmsf.sh` | one chain's per-residue RMSF |
 | `multichain_interchain_dist.sh` | — | inter-chain minimum-image distance (`gmx mindist`) |
@@ -379,7 +448,7 @@ The multi-chain scripts (mirror their single-chain counterparts):
 (one curve per chain pair). Per-chain RMSD fits each chain to *itself*, so it reports
 that chain's internal drift regardless of how the chains sit relative to each other.
 
-`multichain_chain_index.py` uses the protein **molecule types** from the topology
+`gromd-chain-index` uses the protein **molecule types** from the topology
 (the physically-correct chains), not `gmx splitch` (which over-split one observed
 system 2→3 on an internal residue-numbering gap).
 
@@ -400,10 +469,10 @@ XTC=OUTDIR/prod/md.xtc
 P=OUTDIR/analysis/md
 
 bash   fix_PBC_strip_align.sh "$TPR" "$XTC" "$P"
-bash   calc_traj_rmsd.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rmsd.xvg" && python plot_xvg.py "${P}_rmsd.xvg" "${P}_rmsd.png"
-bash   calc_traj_rg.sh   "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rg.xvg"   && python plot_xvg.py "${P}_rg.xvg"   "${P}_rg.png"
-bash   calc_traj_rmsf.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rmsf.xvg" && python plot_xvg.py "${P}_rmsf.xvg" "${P}_rmsf.png"
-bash   calc_traj_dssp.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_dssp.dat" && python plot_dssp.py "${P}_dssp.dat" "${P}_dssp.png"
+bash   calc_traj_rmsd.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rmsd.xvg" && gromd-plot-xvg "${P}_rmsd.xvg" "${P}_rmsd.png"
+bash   calc_traj_rg.sh   "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rg.xvg"   && gromd-plot-xvg "${P}_rg.xvg"   "${P}_rg.png"
+bash   calc_traj_rmsf.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_rmsf.xvg" && gromd-plot-xvg "${P}_rmsf.xvg" "${P}_rmsf.png"
+bash   calc_traj_dssp.sh "${P}_stripped_aligned.gro" "${P}_stripped_aligned.xtc" "${P}_dssp.dat" && gromd-plot-dssp "${P}_dssp.dat" "${P}_dssp.png"
 ```
 
 ### T-REMD
@@ -414,7 +483,7 @@ TPR=OUTDIR/prod/rep000/remd.tpr
 XTC=OUTDIR/prod/rep000/remd.xtc
 P=OUTDIR/analysis/remd_rep000
 
-python remd_acceptance.py OUTDIR              # QC: exchange acceptance rates
+gromd-acceptance OUTDIR                       # QC: exchange acceptance rates
 bash   fix_PBC_strip_align.sh "$TPR" "$XTC" "$P"
 # ... then the same calc_traj_*/plot_* calls as above
 ```

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# cluster_traj.py — conformational clustering of a stripped/aligned trajectory
+# clustering.py — conformational clustering of a stripped/aligned trajectory
 # ─────────────────────────────────────────────────────────────────────────────
 # Groups the sampled frames into discrete conformational states (Cα-RMSD
 # clustering) and reports populations + a representative structure per state.
@@ -8,7 +8,7 @@
 # the protein-only, PBC-fixed, backbone-aligned outputs of strip_and_align).
 #
 # Usage:
-#   python cluster_traj.py STRUCT TRAJ OUT_PREFIX [options]
+#   gromd-cluster STRUCT TRAJ OUT_PREFIX [options]
 #
 #   STRUCT  protein-only reference structure (.gro/.pdb); topology
 #   TRAJ    protein-only trajectory (.xtc), already PBC-fixed and aligned
