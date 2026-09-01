@@ -680,12 +680,15 @@ echo "[OK] Production done"
 CURRENT_STEP=8
 echo "===== STEP 8: Export final PDB ====="
 
-# Export final PDB
-echo 0 | $GMX trjconv \
+# Export final PDB. -pbc mol -center -ur compact (centre group Protein, output
+# System) — matching the analysis path (fix_PBC.sh). Plain -pbc whole only unbreaks
+# molecules: it leaves the protein wherever it diffused to inside a raw rectangular
+# water box, which is what made this PDB look uncorrected.
+printf "Protein\nSystem\n" | $GMX trjconv \
   -s "${PROD_DIR}/md.tpr" \
   -f "${PROD_DIR}/md.gro" \
   -o "${OUTDIR}/${OUTBASE}_final.pdb" \
-  -pbc whole \
+  -pbc mol -center -ur compact \
   > /dev/null 2>&1 || true
 
 echo "[OK] Final PDB exported"

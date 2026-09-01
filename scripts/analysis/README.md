@@ -98,6 +98,61 @@ needs the chains kept in one image — see "Multi-chain complexes" below.
 
 ---
 
+## Solvated snapshots: `extract_solvated_snapshots.sh` (MD only)
+
+```
+bash extract_solvated_snapshots.sh TPR XTC OUT_PREFIX [SHELL_NM] [N_SNAPSHOTS]
+```
+
+Writes a **handful of PBC-corrected PDBs that keep a solvent shell** — the protein
+plus every whole water/ion within `SHELL_NM` (default `0.5` nm = 5 Å) of it. Defaults
+to 5 snapshots evenly spaced over the trajectory (first, three middle, last), all
+fitted onto a common reference so they superimpose when loaded together.
+
+Everything else in this directory works on the *protein-only* trajectory; this is the
+one output that keeps solvent, for looking at interface/bound-state waters.
+
+Outputs go to a **top-level `solvated_snapshots/` dir in `OUTDIR`** (a sibling of
+`analysis/`, not inside it):
+
+```
+<OUTDIR>/solvated_snapshots/md_solvshell_000000ps.pdb
+<OUTDIR>/solvated_snapshots/md_solvshell_000500ps.pdb   ... etc
+```
+
+Zero-padded ps, so lexical order is chronological.
+
+**Why standalone PDBs and not a trajectory.** A shell selection is *dynamic*: the set
+of waters within `SHELL_NM` changes every frame, so the atom count changes every frame.
+XTC/TRR require a fixed atom count and no single topology would match. Independent
+one-frame PDBs sidestep that — each carries its own atoms. This is also why the count
+is deliberately small: a few files you can open at once, not hundreds.
+
+**Order of operations — all three constraints are real:**
+
+1. **PBC before selection.** `gmx select`'s `within` is PBC-aware and will select a
+   water whose *periodic image* is near the protein while its stored coordinate sits
+   across the box — written out as a water floating in space.
+2. **Selection before fitting.** `-fit rot+trans` rotates coordinates but leaves the
+   **box vectors untouched**, so on a fitted frame the PBC-aware `within` measures
+   against a box that no longer matches. Measured on the 2 ns example: 1622 atoms
+   selected on the fitted frame vs 1598 pre-fit — 8 bogus waters, some 23 Å out.
+   Atom numbering is unchanged by fitting, so the index applies to the fitted frame.
+3. **PBC and fitting must be separate `trjconv` calls** — `trjconv` refuses `-fit`
+   together with `-pbc mol`. (Same reason `fix_PBC.sh` and
+   `strip_and_align_trajectory.sh` are separate scripts.)
+
+`run_analysis.sh` runs this automatically for **MD jobs only** and dispatches on chain
+count like everything else. Override the defaults via env vars:
+`SHELL_NM=0.8 N_SNAPSHOTS=9 bash run_analysis.sh OUTDIR`.
+
+To add snapshots to an *older* job that finished before this step existed, call the
+script directly rather than re-running `run_analysis.sh` — the latter also redoes the
+full PBC/strip/align pass over the whole trajectory and overwrites the existing
+`analysis/` outputs, while this reads only the frames it dumps.
+
+---
+
 ## Trajectory metrics (trajectory-agnostic)
 
 All four share one signature and operate on the protein-only, aligned outputs of
@@ -249,7 +304,40 @@ Re-runs overwrite cleanly (GROMACS backups are disabled inside the script), so i
 is idempotent. It needs the production trajectory still present — under the
 folder-symlink output model it reads `prod/md.xtc` or `prod/rep<REP>/remd.xtc`, which
 resolves through the `prod/` folder symlink into scratch (or is a real file when
-`SYMLINK_BULK=0`). Copy anything you need off scratch before it is purged.
+`SYMLINK_BULK=0`). Copy anything you need off scratch before it is purged. Jobs
+predating the output restructure kept their trajectory in a top-level
+`trajectories/` dir; that layout is accepted (with an `[INFO]` line saying so) purely
+so old job dirs stay analysable — nothing writes there any more.
+
+Knobs are environment variables, not job parameters, because this script is meant to
+be re-run by hand — that is where you would want to vary them:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CLUSTER_CUTOFF` | `0.20` | backbone-RMSD clustering cutoff, nm |
+| `SHELL_NM` | `0.5` | solvated-snapshot solvent shell, nm (MD only) |
+| `N_SNAPSHOTS` | `5` | number of solvated snapshots (MD only) |
+
+```bash
+SHELL_NM=0.8 N_SNAPSHOTS=10 bash run_analysis.sh OUTDIR
+```
+
+### On a compute node: `analysis.sbatch`
+
+`run_analysis.sh` is fine on a login node for a small job, but a long trajectory
+(GB-scale XTC, clustering over thousands of frames) belongs in a SLURM allocation:
+
+```
+sbatch --export=ALL,GROMACS_SCRIPTS_DIR=<repo>/scripts/simulation,OUTDIR=<job> analysis.sbatch
+```
+The usual entry point is to copy **`example/submit_jobs/submit_analysis.sh`**, set
+`OUTDIR`, and run it — same copy-and-edit pattern as `submit_MD.sh` / `submit_REMD.sh`.
+
+`analysis.sbatch` supplies only the allocation and the module/GROMACS environment;
+all the work is still `run_analysis.sh`, so MD/T-REMD/REST2 detection and the knobs
+above behave identically. It requests **no GPU** — every analysis step is CPU-only,
+so on `pi_keating` it lands on the CPU-only nodes instead of queueing behind
+production runs.
 
 ## Multi-chain complexes
 
@@ -279,6 +367,7 @@ The multi-chain scripts (mirror their single-chain counterparts):
 | `multichain_fix_PBC.sh` | `fix_PBC.sh` | PBC fix in 3 passes: `whole → cluster → mol+center+compact` |
 | `multichain_fix_PBC_strip_align.sh` | `fix_PBC_strip_align.sh` | orchestrator (reuses `strip_and_align_trajectory.sh`) |
 | `multichain_extract_protein.sh` | `extract_protein.sh` | RMSD reference via `-pbc cluster` |
+| `multichain_extract_solvated_snapshots.sh` | `extract_solvated_snapshots.sh` | solvated snapshot PDBs, chains kept in one image |
 | `multichain_chain_index.py` | — | chain detector + index builder (per-chain + per-chain-backbone groups) |
 | `multichain_chain_rmsd.sh` | `calc_traj_rmsd.sh` | one chain's backbone RMSD, fit to itself |
 | `multichain_chain_rmsf.sh` | `calc_traj_rmsf.sh` | one chain's per-residue RMSF |

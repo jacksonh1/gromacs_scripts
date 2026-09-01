@@ -174,3 +174,59 @@ The engines write the **bulk stage dirs** (`density/ equil/ prod/`, plus MD `hea
 The engines' mdp nonbonded block is AMBER-style: `rvdw = rcoulomb = CUTOFF_NM` (1.0 nm) plain Verlet cutoff + `DispCorr = EnerPres`. CHARMM36/36m was **parameterized with force-switched van der Waals** (`vdw-modifier = force-switch`, `rvdw-switch = 1.0`, `rvdw = rcoulomb = 1.2 nm`) and **no analytic dispersion correction** (`DispCorr = no` — the force-switch already handles the vdW tail; adding DispCorr double-counts). Running CHARMM with the AMBER cutoff settings *runs fine and looks plausible* but produces subtly wrong forces/energies — the classic silent-bad-result failure. Equally, pairing CHARMM protein with plain TIP3P (or AMBER protein with the CHARMM-modified TIP3P) is wrong: each force field is validated only with its matched water. In the GROMACS CHARMM port, `pdb2gmx -water tip3p` resolves to the **CHARMM-modified TIP3P automatically** (it reads `<ff>.ff/tip3p.itp`, i.e. the LJ-on-H variant), so water follows the force field for free — never force plain TIP3P onto CHARMM.
 
 **Fix (applied):** all three engines gate the nonbonded mdp lines on `[[ $FF == charmm* ]]` — CHARMM emits the force-switch block + `DispCorr=no` and forces `CUTOFF_NM=1.2` (with an `[INFO]` override notice); the AMBER branch (`VDW_BLOCK=""`) leaves the generated mdp **byte-identical** to before, so existing amber runs are unchanged. The CHARMM36m force field itself is not bundled with GROMACS (only `charmm27.ff` is) — it's the MacKerell **force-switch** port (`charmm36-feb2026_cgenff-5.0`, renamed `charmm36m.ff`) installed under `$HOME/opt/gromacs/ff/` and found via `export GMXLIB` in `site_config.sh` (searched in addition to each build's bundled `top/`, so amber keeps working). **Do NOT use the `ljpme` port** with these force-switch settings — LJ-PME needs `vdwtype = PME` + a different mdp path. Select per job with `FF=charmm36m` (keep `WATER=tip3p`). Verified: pdb2gmx builds the topology ("The Charmm36m force field and the tip3p water model are used") and grompp accepts the force-switch tpr.
+
+### GROMACS: `gmx trjconv` cannot combine `-fit` with `-pbc mol` — they must be separate passes
+
+`trjconv` refuses `-fit` together with any `-pbc` mode other than `none`/`whole`, because a PBC wrap applied after a rotation would re-wrap atoms against a box the coordinates no longer match. This is *why* the analysis layer is split into `fix_PBC.sh` (PBC) and `strip_and_align_trajectory.sh` (fit) rather than one script — the two-script shape is a GROMACS constraint, not a stylistic choice.
+
+**Fix / rule:** any new tool that needs both PBC treatment and alignment must run two `trjconv` calls, PBC first. See `extract_solvated_snapshots.sh` for the pattern.
+
+### GROMACS: `-fit rot+trans` rotates coordinates but NOT the box — never run a PBC-aware selection on a fitted frame
+
+This is the subtle one. `gmx trjconv -fit rot+trans` rewrites the coordinates but leaves the box vectors **byte-identical**. The frame is therefore internally inconsistent: PBC-aware distance code still measures minimum images against the *original* box, which no longer corresponds to the rotated coordinates. Any `gmx select` distance keyword (`within`, `same residue as (within …)`) run on a fitted frame silently returns a **wrong** atom set.
+
+Measured on `example/outputs/output_MD/helix_fusion-2ns-MD-300K-NPT` at t=500 ps with a 0.5 nm shell: selecting on the fitted frame gave **1622** atoms vs **1598** on the same frame pre-fit — 8 spurious waters, the furthest **23 Å** from the protein, which render as water floating in empty space. Nothing errors; the PDB just quietly contains the wrong molecules.
+
+**Fix / rule:** compute the selection on the **PBC-corrected but unfitted** frame, then apply the resulting index to the fitted frame — `-fit` does not renumber atoms, so the index stays valid. Order is **PBC → select → fit → write**. More generally: treat any fitted/rotated frame as having a meaningless box, and never feed one to a distance-based selection or to `gmx mindist`/`gmx select`.
+
+### GROMACS: a solvent-shell selection must come AFTER PBC centering
+
+`gmx select`'s `within` is PBC-aware, so on a raw frame it will select a water whose *periodic image* is near the protein while its stored coordinate sits across the box — written out as a water far from everything. Running `-pbc mol -center -ur compact` first puts the protein at the box centre with all nearest images already in place, so the selected waters are the ones physically drawn next to it.
+
+**Fix / rule:** PBC-correct (and for a complex, `whole → cluster → mol+center+compact`) before any shell selection. Sanity-check the result by measuring the max water→protein distance: it should not exceed the shell by more than ~1 Å (whole-residue selection means a water's O can sit slightly beyond a cutoff satisfied by its H).
+
+### GROMACS: `gmx select` names a selection with a LEADING QUOTED STRING, not `Name =`
+
+`-select 'Shell = group "Protein" or ...'` does **not** name a selection — in the GROMACS selection language `name = expr` declares a reusable *variable*, which is not itself a selection, so the command dies with `Error in user input: Too few selections provided`. The naming syntax is a leading quoted string: `-select '"Shell" group "Protein" or ...'`.
+
+Second trap in the same area: for a **dynamic** selection, `gmx select -on` stamps the frame and time into the group name — `[ Shell ]` is written as `[ Shell_f0_t1000.000 ]`. Selecting that group by name downstream fails. Select it by **index** instead (`printf "0\n" | gmx trjconv ... -n shell.ndx`); one selection over one frame means the ndx holds exactly one group, so `0` is unambiguous.
+
+### GROMACS: do NOT parse `gmx check` for a trajectory's last frame time
+
+Two independent traps, which is why the answer is "use something else entirely":
+
+1. **The output uses carriage returns.** `gmx check -f traj.xtc` draws progress with `\r`, so every `Reading frame … time …` update *and* any final `Last frame  200 time 2000.000` share **one physical line**. `awk '/^Last frame/'` never matches and silently yields an empty string.
+2. **`Last frame` is throttled and often never printed at all.** The progress interval widens as the trajectory gets longer (every frame → every 10 → …). On a long run the final update is simply skipped. Measured on a 2501-frame, 808 MB xtc: the last thing printed was `Reading frame 2000 time 40000.000`, no `Last frame` line was emitted, and **`gmx check` still exited 0**. The same parse worked on 14 other jobs in the same sweep — i.e. it fails for *some* inputs only, the worst failure mode there is.
+
+**Fix / rule:** dump the final frame and read the time GROMACS stamps into the `.gro` **title line**, which is written unconditionally:
+
+```bash
+printf "System\n" | $GMX trjconv -s "$TPR" -f "$XTC" -o last.gro -dump 999999999
+LAST_PS=$(head -1 last.gro | sed -n 's/.*t=[[:space:]]*\([0-9.eE+-]\{1,\}\).*/\1/p')
+```
+(`gmx check`'s `Item / #frames / Timestep` table is a second option, but `(n-1)×dt` assumes a uniform timestep and a `t=0` start, so it is strictly weaker.) Costs one pass over the trajectory — the same as `gmx check` would.
+
+More generally: **never parse a GROMACS progress readout.** It is throttled, carriage-return drawn, and goes to stderr. Parse a file GROMACS wrote.
+
+### Bash: a `[[ … ]] && echo` as the LAST line of a `set -e` script fails the job
+
+Every engine sbatch runs under `set -euo pipefail` and ends with a block of summary
+`echo`s. Writing a conditional one of those as `[[ -d "$DIR" ]] && echo "..."` is a trap:
+when the test is false the compound command returns 1, and because it is the *last*
+command the script exits 1 — SLURM then reports a fully successful run as **FAILED**.
+(`set -e` does not fire on the test itself, since it is the left side of `&&`; the damage
+is entirely in the exit status.)
+
+**Fix / rule:** use a real `if` for conditional output near the end of a script, or append
+`|| true`. The same applies to any `((counter++))` (returns 1 when the pre-increment value
+is 0) or `grep -q` used as the final statement.

@@ -34,6 +34,7 @@ OUTDIR/
 ├── build/                  # Step 2 — System building                    [REAL]
 ├── em/                     # Step 3 — Energy minimization                 [REAL]
 ├── analysis/               # Step 10 — post-analysis outputs              [REAL]
+├── solvated_snapshots/     # Step 10 — PDB snapshots incl. 5 Å solvent shell [REAL]
 ├── logs/                   # mdrun stdout logs                            [REAL]
 ├── heat/     ─▶ scratch    # Step 4 — Heat (NVT, restrained)              [SYMLINK]
 ├── density/  ─▶ scratch    # Step 5 — Density equilibration (NPT, restrained, iterative)
@@ -44,7 +45,8 @@ OUTDIR/
 └── <OUTBASE>_final.pdb     # Final structure exported from production
 ```
 
-**Output model (folder-symlink).** The small dirs (`build/ em/ analysis/ logs/`,
+**Output model (folder-symlink).** The small dirs (`build/ em/ analysis/
+solvated_snapshots/ logs/`,
 `parameters.txt`, final PDB) are **real** in `OUTDIR`; the bulk stage dirs (`heat/
 density/ [relax/] prod/`) are **folder symlinks into scratch** (`SCRATCH_DIR`), so
 mdrun writes trajectories straight onto scratch — quota-safe, laptop-sync-friendly, and
@@ -192,6 +194,24 @@ produces the **same files as above** on the whole complex, **plus**:
 
 See `scripts/analysis/README.md` → "Multi-chain complexes".
 
+### `solvated_snapshots/` — PDBs that keep the solvent (Step 10, MD only)
+
+Everything in `analysis/` is protein-only. These are the exception: a handful of
+PBC-corrected, mutually-aligned PDBs holding the protein **plus every whole water/ion
+within 5 Å of it** — for inspecting interface / bound-state waters.
+
+| File | Description |
+|------|-------------|
+| `md_solvshell_<NNNNNN>ps.pdb` | One snapshot, protein + 5 Å solvent shell, backbone-fitted to the t=0 snapshot. Zero-padded ps ⇒ lexical order is chronological |
+
+Five snapshots by default (first, three middle, last). Load them all at once — they
+superimpose. Both the shell thickness and the count are overridable:
+`SHELL_NM=0.8 N_SNAPSHOTS=9 bash scripts/analysis/run_analysis.sh OUTDIR`.
+
+The atom count differs between snapshots **by design** — the shell is recomputed per
+frame, so this is not a trajectory and there is no matching topology file. See
+`scripts/analysis/README.md` → "Solvated snapshots" for why.
+
 ### `parameters.txt`
 
 Plain-text record of all simulation parameters (force field, temperature,
@@ -209,4 +229,6 @@ timestep, production length, NPT convergence segments, etc.) and the scratch pat
 | RMSD / Rg / RMSF / DSSP | `analysis/md_{rmsd,rg,rmsf,dssp}.*` |
 | Conformational states | `analysis/clustering/md_cluster_summary.txt` + `md_cluster_rep_c*.pdb` (representative structures) |
 | Re-run post-processing | `bash scripts/analysis/run_analysis.sh OUTDIR` (regenerates the whole `analysis/` dir; no resubmission) |
-| Inspect with solvent | `bash scripts/analysis/fix_PBC.sh prod/md.tpr prod/md.xtc analysis/md_pbc.xtc` |
+| Inspect interface waters | `solvated_snapshots/md_solvshell_*.pdb` — open all 5 at once (already aligned) |
+| Inspect with full solvent | `bash scripts/analysis/fix_PBC.sh prod/md.tpr prod/md.xtc analysis/md_pbc.xtc` |
+| Final structure | `<OUTBASE>_final.pdb` — protein-centred, compact cell (`-pbc mol -center -ur compact`) |

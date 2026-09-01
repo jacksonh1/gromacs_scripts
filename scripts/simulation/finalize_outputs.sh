@@ -5,8 +5,8 @@
 # Under the folder-symlink output model, the bulk stage dirs (prod/ equil/
 # density/ heat/ relax/) are OUTDIR *symlinks into scratch*, so they are already
 # real on scratch after the run. The small, laptop-worthy dirs stay REAL in
-# OUTDIR (analysis/ logs/ em/ build/ parameters.txt, input_structure.pdb, the
-# exported final PDB). This copies those real OUTDIR entries into SCRATCH_DIR at
+# OUTDIR (analysis/ solvated_snapshots/ logs/ em/ build/ parameters.txt,
+# input_structure.pdb, the exported final PDB). This copies those into SCRATCH_DIR at
 # the same relative path so the scratch archive stands alone (self-describing:
 # every scratch dir then carries its own parameters.txt + analysis/).
 #
@@ -32,7 +32,7 @@ SCRATCH_DIR="${SCRATCH_DIR%/}"
 # for REST2; the loop skips anything that does not exist. A stage dir that is a
 # symlink (prod/ equil/ density/ heat/ relax/) is never copied — it already lives
 # on scratch and copying it would recurse. Final PDB(s) are handled below.
-for entry in analysis logs em build topol parameters.txt input_structure.pdb; do
+for entry in analysis solvated_snapshots logs em build topol parameters.txt input_structure.pdb; do
   src="${OUTDIR}/${entry}"
   [[ -e "$src" ]] || continue      # not present for this engine → skip
   [[ -L "$src" ]] && continue      # a stage symlink → already on scratch, never copy

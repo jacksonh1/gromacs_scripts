@@ -646,8 +646,11 @@ echo "[OK] REST2 production done"
 # in OUTDIR when SYMLINK_BULK=0). The scratch archive is completed in STEP 15.
 CURRENT_STEP=12
 echo "===== STEP 12: Export final PDB ====="
-echo 0 | $GMX trjconv -s "${PROD_DIR}/rep000/rest2.tpr" -f "${PROD_DIR}/rep000/rest2.gro" \
-  -o "${OUTDIR}/${OUTBASE}_final_rep000.pdb" -pbc whole > /dev/null 2>&1 || true
+# -pbc mol -center -ur compact (centre group Protein, output System) — matching the
+# analysis path (fix_PBC.sh). Plain -pbc whole only unbreaks molecules and leaves
+# the protein uncentred in the box.
+printf "Protein\nSystem\n" | $GMX trjconv -s "${PROD_DIR}/rep000/rest2.tpr" -f "${PROD_DIR}/rep000/rest2.gro" \
+  -o "${OUTDIR}/${OUTBASE}_final_rep000.pdb" -pbc mol -center -ur compact > /dev/null 2>&1 || true
 echo "[OK] Final PDB exported"
 
 ###############################################################################

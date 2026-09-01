@@ -19,6 +19,7 @@
 #   protein reference       → <prefix>_init.gro    — minimized RMSD reference
 #   calc_traj_rmsd/rg/rmsf/dssp + plot_xvg/plot_dssp   (whole protein/complex)
 #   cluster_traj.py                                — conformational clustering (Cα)
+#   [MD only] solvated snapshots → <OUTDIR>/solvated_snapshots/*.pdb
 #   [multi-chain only] per-chain RMSD/RMSF + inter-chain min distance
 #
 # Two auto-detections, so one command serves every job:
@@ -90,6 +91,17 @@ echo "[INFO] XTC    : $XTC"
 echo "[INFO] PREFIX : $PREFIX"
 
 [[ -f "$TPR" ]]  || { echo "[ERROR] Run input not found: $TPR"; exit 1; }
+
+# Jobs run before the output restructure collected trajectories in a top-level
+# trajectories/ dir instead of leaving them in the stage dir. That dir is gone from
+# the current pipeline, but old job dirs (including the shipped example) still have
+# it, so accept it explicitly rather than failing. Announced loudly — this is a
+# legacy layout, not a search path.
+if [[ ! -e "$XTC" && -e "${OUTDIR}/trajectories/$(basename "$XTC")" ]]; then
+  XTC="${OUTDIR}/trajectories/$(basename "$XTC")"
+  echo "[INFO] Legacy layout: trajectory taken from trajectories/ → $XTC"
+fi
+
 # -e follows symlinks: under the folder-symlink model prod/ is a symlink into scratch
 # (SYMLINK_BULK=1), so the .xtc resolves through it; -e also works when prod/ is a real
 # dir (SYMLINK_BULK=0). A missing file means scratch was purged.
@@ -175,7 +187,23 @@ echo "[CMD] python3 ${SCRIPT_DIR}/cluster_traj.py $REF $FIT ${PREFIX} --cutoff $
 python3 "${SCRIPT_DIR}/cluster_traj.py" "$REF" "$FIT" "${PREFIX}" --cutoff "${CLUSTER_CUTOFF:-0.20}" \
   || echo "[WARN] clustering step failed — re-run the command above"
 
-# ── 3. Multi-chain extras: per-chain RMSD/RMSF + inter-chain min distance ──────
+# ── 3. Solvated snapshots (MD only) → <OUTDIR>/solvated_snapshots/ ────────────
+# A few PBC-corrected, mutually-aligned PDBs that KEEP a solvent shell, for looking
+# at interface waters (the metrics above all run on the protein-only trajectory).
+# MD only for now — this serves bound-state sampling, not the T-REMD objectives.
+# Same chain-count dispatch as step 1. SHELL_NM/N_SNAPSHOTS are analysis knobs, so
+# they are env overrides here rather than job parameters (cf. CLUSTER_CUTOFF above).
+if [[ "$MODE" == "MD" ]]; then
+  echo ""
+  SNAP_PREFIX="${OUTDIR}/solvated_snapshots/md"
+  if (( NCHAINS > 1 )); then SNAP_SCRIPT="multichain_extract_solvated_snapshots.sh"
+  else                       SNAP_SCRIPT="extract_solvated_snapshots.sh"; fi
+  echo "[CMD] bash ${SCRIPT_DIR}/${SNAP_SCRIPT} $TPR $XTC $SNAP_PREFIX ${SHELL_NM:-0.5} ${N_SNAPSHOTS:-5}"
+  bash "${SCRIPT_DIR}/${SNAP_SCRIPT}" "$TPR" "$XTC" "$SNAP_PREFIX" "${SHELL_NM:-0.5}" "${N_SNAPSHOTS:-5}" \
+    || echo "[WARN] solvated snapshots failed — re-run the command above"
+fi
+
+# ── 4. Multi-chain extras: per-chain RMSD/RMSF + inter-chain min distance ──────
 if (( NCHAINS > 1 )); then
   echo ""
   echo "[INFO] Multi-chain extras (per-chain RMSD/RMSF + inter-chain distance)"

@@ -712,12 +712,14 @@ echo "[OK] REMD production done"
 CURRENT_STEP=10
 echo "===== STEP 10: Export final PDB ====="
 
-# Export final PDB from replica 000
-echo 0 | $GMX trjconv \
+# Export final PDB from replica 000. -pbc mol -center -ur compact (centre group
+# Protein, output System) — matching the analysis path (fix_PBC.sh). Plain
+# -pbc whole only unbreaks molecules and leaves the protein uncentred in the box.
+printf "Protein\nSystem\n" | $GMX trjconv \
   -s "${PROD_DIR}/rep000/remd.tpr" \
   -f "${PROD_DIR}/rep000/remd.gro" \
   -o "${OUTDIR}/${OUTBASE}_final_rep000.pdb" \
-  -pbc whole \
+  -pbc mol -center -ur compact \
   > /dev/null 2>&1 || true
 
 echo "[OK] Final PDB exported"

@@ -182,15 +182,21 @@ exchanged between replicas, so:
 - `prod/rep000/remd.xtc` is the lowest-temperature constant-temperature trajectory — use it directly for analysis.
 - No demux step is needed.
 
-To re-run analysis manually:
+To re-run analysis on a finished job (no simulation is re-run) — `run_analysis.sh`
+auto-detects MD vs T-REMD vs REST2 from the job layout, so one command covers all three:
 ```bash
-# T-REMD:
-python scripts/analysis/remd_acceptance.py OUTDIR          # acceptance rates (target 20–30%)
-bash   scripts/analysis/run_analysis.sh    OUTDIR 000      # PBC fix + strip + align + metrics (rep000)
+# Directly (login node / interactive allocation):
+bash   scripts/analysis/run_analysis.sh    OUTDIR          # plain MD
+bash   scripts/analysis/run_analysis.sh    OUTDIR 000      # T-REMD / REST2, slot 000
+python scripts/analysis/remd_acceptance.py OUTDIR          # acceptance rates alone (target 20–30%)
 
-# Plain MD:
-bash   scripts/analysis/run_analysis.sh    OUTDIR          # PBC fix + strip + align + metrics
+# As a SLURM job (long trajectories) — copy, set OUTDIR, run:
+cp example/submit_jobs/submit_analysis.sh my_analysis.sh
+bash my_analysis.sh
 ```
+Re-runs overwrite cleanly, so this is safe to repeat after editing an analysis script.
+`CLUSTER_CUTOFF`, `SHELL_NM` and `N_SNAPSHOTS` are environment overrides rather than job
+parameters — see `scripts/analysis/README.md`.
 
 ---
 
@@ -217,10 +223,13 @@ gromacs_REMD/
 │   │   ├── REMD-output-guide.md   # T-REMD output file reference
 │   │   └── MD-output-guide.md     # Plain-MD output file reference
 │   ├── analysis/               # Post-processing tools (see scripts/analysis/README.md)
+│   │   ├── run_analysis.sh        # Whole post-analysis, re-runnable on a finished job
+│   │   └── analysis.sbatch        # Same, as a CPU-only SLURM job
 │   └── installation/           # GROMACS + PLUMED build scripts
 └── example/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/
         ├── submit_REMD.sh     # T-REMD submission wrapper (reads site_config.sh)
-        └── submit_MD.sh       # Plain-MD submission wrapper (reads site_config.sh)
+        ├── submit_MD.sh       # Plain-MD submission wrapper (reads site_config.sh)
+        └── submit_analysis.sh # Re-run analysis on an existing output dir
 ```
