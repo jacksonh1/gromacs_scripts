@@ -22,7 +22,8 @@ alternative that was rejected and why. Operational pitfalls live in `CLAUDE.md`
   conformational clustering.)
 
 - **Stage folders named by role, not ensemble** (`build/ em/ heat/ density/
-  relax/ prod/` for MD; `build/ em/ density/ equil/ prod/` for REMD). *Why:* the
+  relax/ prod/` for MD; `build/ em/ heat/ density/ equil/ prod/` for REMD).
+  *Why:* the
   name stays correct regardless of which ensemble runs in it. Do not reintroduce
   `nvt/ npt/ eq/`.
 

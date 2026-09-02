@@ -48,10 +48,11 @@ REPLEX_PS="1.0"                       # exchange attempt interval (ps). Keep >= 
                                       #   sub-ps exchange deadlocks GPU-resident REMD
                                       #   (MPI collective hang, clean physics). See GOTCHAS.md.
 # ENSEMBLE=NVT                        # NVT (constant volume) | NPT (C-rescale barostat)
-# REF_P="1.0"                         # bar (NPT only)
-# TAU_P="1.0"                         # ps  (NPT only)
+# REF_P="1.0"                         # bar (barostat reference pressure; density/ uses it under NVT too)
+# TAU_P="2.0"                         # ps  (barostat coupling time; keep >= 1)
 
 # ── Equilibration ────────────────────────────────────────────────────────────
+# HEAT_NS="0.2"                       # NVT thermalization at T_MIN (ns); must be > 0
 # EQUIL_NS="0.2"                      # per-replica equilibration (ns)
 # DENSITY_SEG_STEPS=10000             # steps per density-equilibration segment
 # DENSITY_MIN_SEG=8                   # min segments before convergence check

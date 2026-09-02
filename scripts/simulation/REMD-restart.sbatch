@@ -17,7 +17,7 @@
 # manual scancel — every replica leaves a prod/repNNN/remd.cpt checkpoint. This
 # script continues each replica from its checkpoint to the nsteps already baked
 # into remd.tpr, appending to the existing scratch trajectory (one continuous
-# run). The build/EM/density/equilibration stages are NOT repeated — the .tpr
+# run). The build/EM/heat/density/equilibration stages are NOT repeated — the .tpr
 # files and checkpoints from the original job carry everything they need.
 #
 # It does NOT extend the run beyond the original length. To run LONGER than the
@@ -110,7 +110,7 @@ echo "[OK] Resuming $REPLICAS replicas from checkpoint (-replex $REPLEX_STEPS, -
 # from the checkpoint and truncates the trajectory/energy/log back to that step
 # before continuing. Under the folder-symlink model prod/ is a symlink into scratch
 # (or a real dir when SYMLINK_BULK=0), so remd.xtc already lives at prod/rep*/remd.xtc.
-# GPU/pin flags mirror REMD-gromacs.sbatch STEP 9.
+# GPU/pin flags mirror REMD-gromacs.sbatch STEP 10.
 RESTART_LOG="${OUTDIR}/logs/mdrun_remd_restart_${SLURM_JOB_ID:-manual}.log"
 
 mpirun -np "$REPLICAS" "$GMX" mdrun \
@@ -159,7 +159,7 @@ Submitted from: ${SLURM_SUBMIT_DIR:-N/A}
 EOF
 echo "[OK] Restart provenance appended to ${OUTDIR}/parameters.txt"
 
-# ── Finalize: export final PDB (mirrors STEP 10) ─────────────────────────────
+# ── Finalize: export final PDB (mirrors STEP 11) ─────────────────────────────
 # No trajectory re-linking: under the folder-symlink model remd.xtc is already at
 # prod/rep*/remd.xtc (real on scratch via the prod/ symlink, or real in OUTDIR).
 echo 0 | $GMX trjconv \

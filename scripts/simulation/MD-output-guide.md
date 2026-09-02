@@ -90,9 +90,17 @@ the protein heavy atoms (`-DPOSRES`). Velocities are generated here
 ### `density/` — Density Equilibration (NPT, Step 5)
 
 Equilibrates density at `T_SIM` under constant pressure, **restraints still on**.
-Continues from the heat checkpoint (`gen-vel = no`, `continuation = yes`). Runs
-iteratively (up to `DENSITY_MAX_SEG` segments) until volume converges
-(`< DENSITY_TOL_REL` relative change over `DENSITY_MIN_SEG`+ segments).
+Continues from the heat checkpoint (`gen-vel = no`, `continuation = yes`), and every
+segment thereafter resumes from the previous segment's checkpoint (`grompp -t`), so the
+V-rescale and C-rescale internal state and RNG streams carry across each boundary.
+
+Position restraints are anchored to the **minimized** structure (`em/em.gro`) for every
+segment. A moving reference (the previous segment's output) would resist per-segment
+displacement but never cumulative drift away from the input pose.
+
+Runs iteratively, up to `DENSITY_MAX_SEG` segments, until the volume plateaus: a slope
+test over the trailing `DENSITY_MIN_SEG` segments, not a last-two-segments comparison —
+see `docs/PARAMETERS.md`.
 
 | File | Description |
 |------|-------------|

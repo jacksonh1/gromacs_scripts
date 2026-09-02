@@ -70,8 +70,7 @@ echo "===== STEP 1: Setting parameters ====="
 PDB_IN="${PDB_IN:-}"                          # required (validated below) — no default
 OUTBASE="${OUTBASE:-$(basename "${PDB_IN%.*}")}"
 OUTDIR="${OUTDIR:-remd_${OUTBASE}}"
-FORCE="${FORCE:-0}"
-# Output model: 1 (default) = bulk stage dirs (density/ equil/ prod/) are folder
+# Output model: 1 (default) = bulk stage dirs (heat/ density/ equil/ prod/) are folder
 # symlinks into scratch (quota-safe, laptop-sync-friendly); 0 = everything real in
 # OUTDIR with no scratch offload.
 SYMLINK_BULK="${SYMLINK_BULK:-1}"
@@ -98,12 +97,12 @@ SALT_MOLAR="${SALT_MOLAR:-0.15}"
 # Simulation parameters
 REPLICAS=${SLURM_NTASKS:-${REPLICAS:-48}}
 
-# OpenMP threads for the SERIAL prep steps (EM, NPT density). These run as a
+# OpenMP threads for the SERIAL prep steps (EM, NVT heat, NPT density). These run as a
 # single rank before the replicas exist, so they may use the whole node: derive
 # the count from the full allocation (ntasks × cpus-per-task), capped at 8 to stay
 # in GROMACS' good OpenMP-scaling range and to never request more threads than
 # cores. Overridable via NTOMP_SERIAL. (The multi-replica equilibration/production steps use
-# one rank per replica with -ntomp 1 instead — see STEPS 7 and 9.)
+# one rank per replica with -ntomp 1 instead — see STEPS 8 and 10.)
 _NODE_CORES=$(( ${SLURM_NTASKS:-1} * ${SLURM_CPUS_PER_TASK:-1} ))
 NTOMP_SERIAL="${NTOMP_SERIAL:-$(( _NODE_CORES < 8 ? _NODE_CORES : 8 ))}"
 
@@ -145,6 +144,7 @@ REPLEX_PS="${REPLEX_PS:-1.0}"            # exchange attempt interval (ps); keep 
 TOTAL_NS="${TOTAL_NS:-20}"               # total production per replica (ns)
 
 # Equilibration
+HEAT_NS="${HEAT_NS:-0.2}"                 # NVT thermalization length (ns); velocities are generated here
 EQUIL_NS="${EQUIL_NS:-0.2}"               # per-replica equilibration length (ns)
 DENSITY_SEG_STEPS="${DENSITY_SEG_STEPS:-10000}"
 DENSITY_MIN_SEG="${DENSITY_MIN_SEG:-8}"
@@ -153,15 +153,25 @@ DENSITY_TOL_REL="${DENSITY_TOL_REL:-0.005}"
 
 # Ensemble for production + per-replica equilibration
 ENSEMBLE="${ENSEMBLE:-NVT}"              # NVT (constant volume) | NPT (C-rescale barostat)
-REF_P="${REF_P:-1.0}"                    # bar  (NPT only)
-TAU_P="${TAU_P:-1.0}"                    # ps   (NPT only)
+# Barostat settings. NOT "NPT only": the density stage is pressure-coupled for BOTH
+# ensembles (it is what SETS the box), so REF_P is the reference pressure of the box
+# production inherits — under ENSEMBLE=NVT that box is then frozen at REF_P. ENSEMBLE
+# only controls the stages AFTER density/: NPT keeps the barostat running in equil/ and
+# prod/, NVT turns it off and freezes the box at whatever density/ ended on.
+REF_P="${REF_P:-1.0}"                    # bar
+# tau-p 2.0: C-rescale samples the correct NPT distribution at any tau-p (unlike
+# Berendsen, which under-fluctuates the volume), so this sets the volume's relaxation
+# time, not the ensemble. Below ~1 ps the barostat starts chasing instantaneous virial
+# noise (pressure autocorrelation is 0.1-0.5 ps), which does spurious work against the
+# position restraints in density/. 2-5 ps is the usual GROMACS range.
+TAU_P="${TAU_P:-2.0}"                    # ps
 
 # Validate resolved parameters before deriving anything or building. Export the job
 # params so validate_params.py reads them from the environment (covers config- and
 # --export-set values alike). Keep this list in sync with validate_params.py.
-export PDB_IN OUTBASE OUTDIR FORCE FF WATER BOX_SHAPE BOX_BUFFER NEUTRALIZE \
+export PDB_IN OUTBASE OUTDIR FF WATER BOX_SHAPE BOX_BUFFER NEUTRALIZE \
        SALT_MOLAR REPLICAS NTOMP_SERIAL DT_PS T_MIN T_MAX CUTOFF_NM GAMMA_LN \
-       REPLEX_PS TOTAL_NS EQUIL_NS DENSITY_SEG_STEPS DENSITY_MIN_SEG DENSITY_MAX_SEG \
+       REPLEX_PS TOTAL_NS HEAT_NS EQUIL_NS DENSITY_SEG_STEPS DENSITY_MIN_SEG DENSITY_MAX_SEG \
        DENSITY_TOL_REL ENSEMBLE REF_P TAU_P PRESERVE_SCRATCH_FROM SYMLINK_BULK SEED CFG_REPLICAS
 python3 "$VALIDATE_PARAMS" --engine remd
 
@@ -171,20 +181,21 @@ TAU_T=$(python3 -c "print(f'{1.0/float(\"${GAMMA_LN}\"):.4f}')")
 REPLEX_STEPS=$(python3 -c "print(int(round(float('${REPLEX_PS}')/float('${DT_PS}'))))")
 PROD_NSTEPS=$(python3 -c "print(int(round(float('${TOTAL_NS}')*1000/float('${DT_PS}'))))")
 EQUIL_NSTEPS=$(python3 -c "print(int(round(float('${EQUIL_NS}')*1000/float('${DT_PS}'))))")
+HEAT_NSTEPS=$(python3 -c "print(int(round(float('${HEAT_NS}')*1000/float('${DT_PS}'))))")
 
 # Resolve the scratch-preservation stage name to this engine's step index (stage names
 # mean the same thing across MD/REMD; the index they map to is engine-specific). The
 # validator already restricted PRESERVE_SCRATCH_FROM to {prod,density,always,never}.
 case "$PRESERVE_SCRATCH_FROM" in
   always)  PRESERVE_FROM_STEP=0 ;;
-  density) PRESERVE_FROM_STEP=5 ;;
-  prod)    PRESERVE_FROM_STEP=9 ;;
+  density) PRESERVE_FROM_STEP=6 ;;
+  prod)    PRESERVE_FROM_STEP=10 ;;
   never)   PRESERVE_FROM_STEP=999 ;;
   *) echo "[ERROR] invalid PRESERVE_SCRATCH_FROM='$PRESERVE_SCRATCH_FROM'"; exit 1 ;;
 esac
 
-# Pressure-coupling block injected into the per-replica equilibration (STEP 6) and
-# production (STEP 8) mdp. NPT uses C-rescale — robust + correct ensemble, matching the
+# Pressure-coupling block injected into the per-replica equilibration (STEP 7) and
+# production (STEP 9) mdp. NPT uses C-rescale — robust + correct ensemble, matching the
 # density-equilibration barostat. GROMACS adds the PV term to the replica-exchange
 # Metropolis criterion automatically when pressure coupling is on, so -replex is unchanged.
 if [[ "$ENSEMBLE" == "NPT" ]]; then
@@ -217,10 +228,19 @@ fi
 cleanup_scratch_on_error() {
   local rc=$?
   if [[ -n "$SCRATCH_DIR" && -d "$SCRATCH_DIR" ]]; then
+    # PRESERVE_SCRATCH_FROM decides the fate of the scratch dir, full stop — an explicit
+    # policy is not overridden here, and "never" means never. Constraint-failure dumps
+    # (step*.pdb, in the cwd = SCRATCH_DIR since EM) are only 75 MB each next to a scratch
+    # tree that can be many GB, and on a strained structure EM dumps on EVERY run, so
+    # keeping scratch whenever dumps exist would quietly disable the knob for that whole
+    # class of input. Instead: always write the few-KB report into OUTDIR so the failure
+    # stays on record, and let the policy govern the bulky PDBs.
     if (( CURRENT_STEP >= PRESERVE_FROM_STEP )); then
       echo "[ERROR] Failed at step $CURRENT_STEP (rc=$rc); PRESERVING scratch: $SCRATCH_DIR"
+      bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "$SCRATCH_DIR" "$OUTDIR" retained || true
     else
       echo "[ERROR] Failed at step $CURRENT_STEP (rc=$rc); cleaning scratch: $SCRATCH_DIR"
+      bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "$SCRATCH_DIR" "$OUTDIR" deleted || true
       rm -rf "$SCRATCH_DIR"
     fi
   fi
@@ -236,15 +256,15 @@ if (( SCRATCH_AVAIL < 100 )); then
 fi
 
 # ── Output directory tree (folder-symlink model) ─────────────────────────────
-# Small, laptop-worthy dirs stay REAL in OUTDIR. The bulk stage dirs (density/
-# equil/ prod/) are SYMLINKS into scratch when SYMLINK_BULK=1 — created BEFORE the
+# Small, laptop-worthy dirs stay REAL in OUTDIR. The bulk stage dirs (heat/
+# density/ equil/ prod/) are SYMLINKS into scratch when SYMLINK_BULK=1 — created BEFORE the
 # run so mdrun writes trajectories/intermediates straight onto scratch and the
 # tight-quota pool is never touched — or REAL dirs in OUTDIR when SYMLINK_BULK=0.
 # Either way the stage-dir variables below point at ${OUTDIR}/<stage>, so nothing
 # downstream (deffnm/-x/grompp) changes. build/ stays real so the solvate/genion
 # topology rename() stays same-filesystem (see gotcha).
 mkdir -p "${OUTDIR}"/{build,em,logs,analysis} ./logs
-for stage in density equil prod; do
+for stage in heat density equil prod; do
   if (( SYMLINK_BULK )); then
     mkdir -p "${SCRATCH_DIR}/${stage}"
     ln -s "${SCRATCH_DIR}/${stage}" "${OUTDIR}/${stage}"
@@ -252,6 +272,7 @@ for stage in density equil prod; do
     mkdir -p "${OUTDIR}/${stage}"
   fi
 done
+
 
 [[ -f "$PDB_IN" ]] || { echo "[ERROR] PDB not found: $PDB_IN"; exit 1; }
 
@@ -359,6 +380,24 @@ SYS_TOP="${BUILD}/${OUTBASE}.top"
 [[ -f "$SYS_GRO" && -f "$SYS_TOP" ]] || { echo "[ERROR] System build failed"; exit 1; }
 echo "[OK] System built"
 
+# ── Where GROMACS drops its crash dumps ──────────────────────────────────────
+# On a constraint failure mdrun writes step<N>b.pdb / step<N>c.pdb (coordinates before
+# and after constraining) into the CURRENT WORKING DIRECTORY — which for an sbatch is the
+# submit directory, not the job's OUTDIR. On a large system those are ~75 MB *each*, so a
+# strained input silently drops hundreds of MB next to the submit scripts on the
+# tight-quota pool. Move cwd to where the bulk already goes, so dumps land with the job.
+#
+# THIS MUST COME AFTER THE BUILD STEP, NOT BEFORE IT. solvate/genion finish their topology
+# edit with a rename() that is fatal across filesystems, so while they run the cwd has to
+# stay on the same filesystem as the topology (see the OUTDIR-filesystem gotcha). Moving
+# this above the build makes STEP 3 die in solvate. Every mdrun runs at or after EM, so
+# here is early enough to catch them all.
+#
+# Otherwise safe: every path used below is absolute; SLURM opened its -o/-e files relative
+# to the submit dir before this script body started; $SLURM_SUBMIT_DIR is an env var; and
+# multi-replica mdrun (-multidir) chdirs each rank into its own rep dir regardless.
+cd "${SCRATCH_DIR:-$OUTDIR}"
+
 ###############################################################################
 # STEP 4 — Energy minimization
 ###############################################################################
@@ -403,39 +442,107 @@ $GMX mdrun \
 echo "[OK] Minimization complete"
 
 ###############################################################################
-# STEP 5 — NPT density equilibration (iterative convergence)
+# STEP 5 — Heat (NVT, restrained, thermalize at T_MIN)
 ###############################################################################
+# Thermalize at constant volume BEFORE the barostat is switched on, matching the MD
+# engine. Previously the density stage generated velocities itself and ran the first
+# segment at dt=0.001 as a crash guard; that put C-rescale on a minimized configuration
+# whose instantaneous virial pressure is far from equilibrium, so the barostat's first
+# scaling decisions were driven by noise. Thermalizing first removes the need for the
+# short-timestep first segment and lets every density segment be identical.
 CURRENT_STEP=5
-echo "===== STEP 5: NPT density equilibration (iterative) ====="
+echo "===== STEP 5: Heat (NVT, restrained) ====="
+
+HEAT_DIR="${OUTDIR}/heat"
+cat > "${HEAT_DIR}/heat.mdp" <<EOF
+integrator  = md
+dt          = ${DT_PS}
+nsteps      = ${HEAT_NSTEPS}
+nstxout-compressed = 2500
+nstlog      = 1000
+nstenergy   = 1000
+
+cutoff-scheme = Verlet
+nstlist     = 10
+coulombtype = PME
+rcoulomb    = ${CUTOFF_NM}
+${VDW_BLOCK}rvdw        = ${CUTOFF_NM}
+DispCorr    = ${DISPCORR}
+pbc         = xyz
+
+tcoupl      = V-rescale
+tc-grps     = Protein Non-Protein
+tau-t       = ${TAU_T} ${TAU_T}
+ref-t       = ${T_MIN} ${T_MIN}
+
+pcoupl      = no
+
+constraints = h-bonds
+constraint-algorithm = LINCS
+
+ld-seed     = ${SEED}
+gen-vel     = yes
+gen-temp    = ${T_MIN}
+gen-seed    = ${SEED}
+
+nstcomm     = 500
+
+; Restrain protein heavy atoms while solvent relaxes around the structure
+define      = -DPOSRES
+EOF
+
+# -c and -r are BOTH the minimized structure: em.gro is the starting configuration and
+# also the fixed position-restraint reference that every restrained stage below anchors
+# to (see POSRES_REF in STEP 6).
+echo "[CMD] $GMX grompp -f ${HEAT_DIR}/heat.mdp -c ${EM_DIR}/em.gro -r ${EM_DIR}/em.gro -p $SYS_TOP -o ${HEAT_DIR}/heat.tpr"
+$GMX grompp \
+  -f "${HEAT_DIR}/heat.mdp" \
+  -c "${EM_DIR}/em.gro" \
+  -r "${EM_DIR}/em.gro" \
+  -p "$SYS_TOP" \
+  -o "${HEAT_DIR}/heat.tpr" \
+  -po "${HEAT_DIR}/mdout_heat.mdp" \
+  -maxwarn 5 \
+  > "${HEAT_DIR}/grompp.log" 2>&1
+
+echo "[CMD] $GMX mdrun -deffnm ${HEAT_DIR}/heat -ntomp $NTOMP_SERIAL -nb gpu -pme gpu -bonded gpu"
+$GMX mdrun \
+  -deffnm "${HEAT_DIR}/heat" \
+  -x "${HEAT_DIR}/heat.xtc" \
+  -ntomp "$NTOMP_SERIAL" -nb gpu -pme gpu -bonded gpu \
+  > "${OUTDIR}/logs/mdrun_heat.log" 2>&1
+
+[[ -f "${HEAT_DIR}/heat.gro" && -f "${HEAT_DIR}/heat.cpt" ]] || { echo "[ERROR] Heat step failed (no heat.gro/heat.cpt). The density stage resumes from heat.cpt, so HEAT_NS must be > 0."; exit 1; }
+echo "[OK] Heat step done"
+
+###############################################################################
+# STEP 6 — NPT density equilibration (iterative convergence)
+###############################################################################
+CURRENT_STEP=6
+echo "===== STEP 6: NPT density equilibration (iterative) ====="
 
 DENSITY_DIR="${OUTDIR}/density"
-LAST_GRO="${EM_DIR}/em.gro"
-prev_vol=""
+# Position-restraint reference for every segment. It is the MINIMIZED structure and it
+# never changes: grompp -r sets the coordinates the harmonic restraints pull toward, so
+# passing the previous segment's output (as this loop used to) re-anchors the restraint
+# to wherever the protein has already drifted. That resists per-segment displacement but
+# never CUMULATIVE displacement — any systematic force pulling the structure off the
+# designed pose then accumulates unopposed across 8–20 segments, before production has
+# started and before the RMSD reference frame is set.
+POSRES_REF="${EM_DIR}/em.gro"
+LAST_GRO="${HEAT_DIR}/heat.gro"
+LAST_CPT="${HEAT_DIR}/heat.cpt"
+volumes=()
 seg=0
 
 while (( seg < DENSITY_MAX_SEG )); do
   seg=$((seg+1))
   echo "[INFO] NPT segment $seg"
 
-  if (( seg == 1 )); then
-    GEN_VEL="yes"
-    GEN_TEMP="${T_MIN}"
-    CONT_FLAGS="gen-vel = yes
-gen-temp = ${T_MIN}
-gen-seed = ${SEED}"
-    SEG_DT="0.001"
-    SEG_STEPS="${DENSITY_SEG_STEPS}"
-  else
-    CONT_FLAGS="gen-vel = no
-continuation = yes"
-    SEG_DT="${DT_PS}"
-    SEG_STEPS="${DENSITY_SEG_STEPS}"
-  fi
-
   cat > "${DENSITY_DIR}/density_seg${seg}.mdp" <<EOF
 integrator  = md
-dt          = ${SEG_DT}
-nsteps      = ${SEG_STEPS}
+dt          = ${DT_PS}
+nsteps      = ${DENSITY_SEG_STEPS}
 nstxout-compressed = 1000
 nstlog      = 1000
 nstenergy   = 1000
@@ -455,8 +562,8 @@ ref-t       = ${T_MIN} ${T_MIN}
 
 pcoupl      = C-rescale
 pcoupltype  = isotropic
-tau-p       = 1.0
-ref-p       = 1.0
+tau-p       = ${TAU_P}
+ref-p       = ${REF_P}
 compressibility = 4.5e-5
 refcoord-scaling = com
 
@@ -464,16 +571,25 @@ constraints = h-bonds
 constraint-algorithm = LINCS
 
 ld-seed     = ${SEED}
-
-${CONT_FLAGS}
+gen-vel     = no
+continuation = yes
 
 define      = -DPOSRES
 EOF
 
+  # -t "$LAST_CPT" carries the integrator state across the segment boundary. A .gro holds
+  # only positions, velocities (at %8.4f nm/ps) and the box; the checkpoint additionally
+  # holds the V-rescale and C-rescale internal state and their RNG streams. Without it the
+  # barostat restarts cold at every boundary and its first scaling decision is driven by
+  # the instantaneous virial pressure (which fluctuates by hundreds of bar), kicking the
+  # volume — the very quantity the convergence test below measures. `continuation = yes`
+  # is also only strictly correct from a checkpoint, since it tells mdrun the input already
+  # satisfies the constraints.
   $GMX grompp \
     -f "${DENSITY_DIR}/density_seg${seg}.mdp" \
     -c "$LAST_GRO" \
-    -r "$LAST_GRO" \
+    -r "$POSRES_REF" \
+    -t "$LAST_CPT" \
     -p "$SYS_TOP" \
     -o "${DENSITY_DIR}/density_seg${seg}.tpr" \
     -po "${DENSITY_DIR}/mdout_density${seg}.mdp" \
@@ -494,42 +610,43 @@ EOF
 
   vol_avg=$(awk '!/^[#@]/ {sum+=$2; n++} END {if(n>0) printf "%.6f", sum/n}' \
             "${DENSITY_DIR}/volume_seg${seg}.xvg")
+  # A missing/empty volume would otherwise reach density_converged.py as an empty argv
+  # entry and die there as an argparse error about a float, several layers from the cause.
+  [[ -n "$vol_avg" ]] || { echo "[ERROR] no Volume in ${DENSITY_DIR}/volume_seg${seg}.xvg — did 'gmx energy' fail for segment ${seg}?"; exit 1; }
   echo "[INFO] Segment $seg average volume: ${vol_avg} nm^3"
+  volumes+=("$vol_avg")
 
-  if [[ -n "$prev_vol" ]]; then
-    rel_change=$(python3 -c "
-prev=$prev_vol; curr=$vol_avg
-print(abs(curr-prev)/prev if prev!=0 else 1.0)
-")
-    echo "[INFO] Relative volume change: $rel_change"
-
-    if (( seg >= DENSITY_MIN_SEG )); then
-      converged=$(python3 -c "print(0 if float('$rel_change')>float('${DENSITY_TOL_REL}') else 1)")
-      if (( converged )); then
-        echo "[INFO] Density converged at segment $seg"
-        break
-      fi
-    fi
+  # Plateau test over the trailing DENSITY_MIN_SEG segments, not a consecutive-segment
+  # difference: the old test compared only V_n against V_{n-1}, which a steady drift of
+  # just under DENSITY_TOL_REL per segment passes on every comparison while the box keeps
+  # contracting several percent overall. See density_converged.py.
+  conv_line=$(python3 "${GROMACS_SCRIPTS_DIR}/density_converged.py" \
+                --tol "$DENSITY_TOL_REL" --min-seg "$DENSITY_MIN_SEG" "${volumes[@]}")
+  converged="${conv_line%% *}"            # leading verdict: 1 = converged, 0 = not
+  echo "[INFO] density: ${conv_line#* }"  # trailing reason, next to the volumes above
+  if (( converged )); then
+    echo "[INFO] Density converged at segment $seg"
+    break
   fi
 
-  prev_vol="$vol_avg"
   LAST_GRO="${DENSITY_DIR}/density_seg${seg}.gro"
+  LAST_CPT="${DENSITY_DIR}/density_seg${seg}.cpt"
 done
 
-if (( seg == DENSITY_MAX_SEG )); then
+if (( ! converged )); then
   echo "[WARNING] Reached DENSITY_MAX_SEG=${DENSITY_MAX_SEG} without convergence; using last segment"
 fi
 
 DENSITY_GRO="${DENSITY_DIR}/density_seg${seg}.gro"
 DENSITY_CPT="${DENSITY_DIR}/density_seg${seg}.cpt"
-[[ -f "$DENSITY_GRO" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
+[[ -f "$DENSITY_GRO" && -f "$DENSITY_CPT" ]] || { echo "[ERROR] NPT equilibration failed"; exit 1; }
 echo "[OK] NPT density equilibration done"
 
 ###############################################################################
-# STEP 6 — Prepare per-replica equilibration directories
+# STEP 7 — Prepare per-replica equilibration directories
 ###############################################################################
-CURRENT_STEP=6
-echo "===== STEP 6: Preparing per-replica equilibration (${ENSEMBLE}) ====="
+CURRENT_STEP=7
+echo "===== STEP 7: Preparing per-replica equilibration (${ENSEMBLE}) ====="
 
 EQUIL_DIR="${OUTDIR}/equil"
 
@@ -589,10 +706,10 @@ done
 echo "[OK] equilibration .tpr files prepared for all replicas"
 
 ###############################################################################
-# STEP 7 — Run per-replica equilibration
+# STEP 8 — Run per-replica equilibration
 ###############################################################################
-CURRENT_STEP=7
-echo "===== STEP 7: Running per-replica equilibration ====="
+CURRENT_STEP=8
+echo "===== STEP 8: Running per-replica equilibration ====="
 
 # Build the -multidir list
 MULTIDIR_EQUIL=""
@@ -617,10 +734,10 @@ done
 echo "[OK] per-replica equilibration done"
 
 ###############################################################################
-# STEP 8 — Prepare REMD production inputs
+# STEP 9 — Prepare REMD production inputs
 ###############################################################################
-CURRENT_STEP=8
-echo "===== STEP 8: Preparing REMD production inputs ====="
+CURRENT_STEP=9
+echo "===== STEP 9: Preparing REMD production inputs ====="
 
 PROD_DIR="${OUTDIR}/prod"
 
@@ -682,10 +799,10 @@ done
 echo "[OK] REMD .tpr files prepared"
 
 ###############################################################################
-# STEP 9 — Run T-REMD production
+# STEP 10 — Run T-REMD production
 ###############################################################################
-CURRENT_STEP=9
-echo "===== STEP 9: Running T-REMD production ====="
+CURRENT_STEP=10
+echo "===== STEP 10: Running T-REMD production ====="
 echo "[INFO] ${REPLICAS} replicas × ${TOTAL_NS} ns, exchange every ${REPLEX_PS} ps"
 
 MULTIDIR_PROD=""
@@ -705,9 +822,9 @@ mpirun -np "$REPLICAS" "$GMX" mdrun \
   > "${OUTDIR}/logs/mdrun_remd.log" 2>&1
 
 # Verify every replica produced a final structure. A nonzero mpirun already aborts
-# via set -e + the ERR trap (which preserves scratch, since step 9 >= PRESERVE_FROM_STEP);
+# via set -e + the ERR trap (which preserves scratch, since step 10 >= PRESERVE_FROM_STEP);
 # this additionally catches a silent partial failure where mdrun returns 0 but a
-# replica wrote no output. Mirrors the per-replica equilibration check in STEP 7.
+# replica wrote no output. Mirrors the per-replica equilibration check in STEP 8.
 for i in $(seq 0 $((REPLICAS-1))); do
   idx=$(printf "%03d" "$i")
   [[ -f "${PROD_DIR}/rep${idx}/remd.gro" ]] || { echo "[ERROR] REMD production failed for replica $idx"; exit 1; }
@@ -715,13 +832,13 @@ done
 echo "[OK] REMD production done"
 
 ###############################################################################
-# STEP 10 — Export final PDB
+# STEP 11 — Export final PDB
 ###############################################################################
 # Trajectories need no finalizing: under the folder-symlink model the .xtc files
 # are already at prod/rep*/remd.xtc (real on scratch via the prod/ symlink, or real
-# in OUTDIR when SYMLINK_BULK=0). The scratch archive is completed in STEP 13.
-CURRENT_STEP=10
-echo "===== STEP 10: Export final PDB ====="
+# in OUTDIR when SYMLINK_BULK=0). The scratch archive is completed in STEP 14.
+CURRENT_STEP=11
+echo "===== STEP 11: Export final PDB ====="
 
 # Export final PDB from replica 000. -pbc mol -center -ur compact (centre group
 # Protein, output System) — matching the analysis path (fix_PBC.sh). Plain
@@ -736,9 +853,9 @@ printf "Protein\nSystem\n" | $GMX trjconv \
 echo "[OK] Final PDB exported"
 
 ###############################################################################
-# STEP 11 — Write parameters log
+# STEP 12 — Write parameters log
 ###############################################################################
-CURRENT_STEP=11
+CURRENT_STEP=12
 ELAPSED_S=$(( $(date +%s) - CURRENT_TIME ))
 
 # Write to OUTDIR always; also to scratch when offloading, so each scratch archive
@@ -778,16 +895,17 @@ Cutoff (nm): $CUTOFF_NM
 tau_t (ps): $TAU_T
 Time step (ps): $DT_PS
 RNG seed: $SEED$( [[ "$SEED" == "-1" ]] && echo " (random per run)" || echo " (fixed; per-replica = SEED+i)" )
-Serial-step OMP threads (EM/density): $NTOMP_SERIAL
+Serial-step OMP threads (EM/heat/density): $NTOMP_SERIAL
 Exchange interval (ps): $REPLEX_PS
 Exchange interval (steps): $REPLEX_STEPS
 Production steps: $PROD_NSTEPS
 Production ensemble: $ENSEMBLE$( [[ "$ENSEMBLE" == NPT ]] && echo " (C-rescale, ref-p ${REF_P} bar, tau-p ${TAU_P} ps)" )
+Heat ns: $HEAT_NS
 Per-replica equil ns: $EQUIL_NS
 Output directory: $OUTDIR
 Scratch directory: ${SCRATCH_DIR:-(none — SYMLINK_BULK=0, bulk real in OUTDIR)}
 GPUs: ${SLURM_GPUS_ON_NODE:-unknown}
-Density convergence segments: $seg
+Density convergence segments: $seg$( (( converged )) && echo " (plateau reached)" || echo " (DENSITY_MAX_SEG cap — NOT converged)" )
 
 # ── Provenance ──
 Engine: ${GROMACS_SCRIPTS_DIR}/REMD-gromacs.sbatch
@@ -801,11 +919,11 @@ EOF
 done
 
 ###############################################################################
-# STEP 12 — Post-analysis (acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP
+# STEP 13 — Post-analysis (acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP
 #           + conformational clustering [+ per-chain/inter-chain for complexes], rep000)
 ###############################################################################
-CURRENT_STEP=12
-echo "===== STEP 12: Post-analysis (rep000 / 300 K) ====="
+CURRENT_STEP=13
+echo "===== STEP 13: Post-analysis (rep000 / 300 K) ====="
 
 ANALYSIS_SCRIPTS_DIR="${GROMACS_SCRIPTS_DIR}/../analysis"
 
@@ -819,24 +937,32 @@ bash "${ANALYSIS_SCRIPTS_DIR}/run_analysis.sh" "$OUTDIR" 000 \
   || echo "[WARN] run_analysis.sh failed — re-run the command above"
 
 ###############################################################################
-# STEP 13 — Make the scratch archive self-contained (SYMLINK_BULK=1 only)
+# STEP 14 — Make the scratch archive self-contained (SYMLINK_BULK=1 only)
 ###############################################################################
 # The bulk stages are already real on scratch (written there through the folder
 # symlinks). Copy the small real OUTDIR dirs (analysis/ logs/ em/ build/ +
 # parameters.txt + final PDB) into scratch so it stands alone. No-op when
 # SYMLINK_BULK=0 (nothing was offloaded).
-CURRENT_STEP=13
+CURRENT_STEP=14
 if [[ -n "$SCRATCH_DIR" ]]; then
-  echo "===== STEP 13: Finalizing scratch archive ====="
+  echo "===== STEP 14: Finalizing scratch archive ====="
   echo "[CMD] bash ${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh $OUTDIR $SCRATCH_DIR"
   bash "${GROMACS_SCRIPTS_DIR}/finalize_outputs.sh" "$OUTDIR" "$SCRATCH_DIR" \
     || echo "[WARN] finalize_outputs.sh failed — scratch archive may be incomplete; re-run the command above"
 else
-  echo "===== STEP 13: SYMLINK_BULK=0 — bulk is real in OUTDIR; no scratch archive to finalize ====="
+  echo "===== STEP 14: SYMLINK_BULK=0 — bulk is real in OUTDIR; no scratch archive to finalize ====="
 fi
 
+# ── Constraint-failure check ─────────────────────────────────────────────────
+# Dumps live on scratch (cwd since EM) so they stay off the tight-quota pool, but
+# nobody browses scratch — so surface them in OUTDIR and in this log. Writes
+# OUTDIR/CONSTRAINT_FAILURES.txt only when there are dumps, and clears a stale one
+# otherwise, so the file's presence always refers to THIS run.
+echo "[CMD] bash ${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh ${SCRATCH_DIR:-$OUTDIR} $OUTDIR"
+bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "${SCRATCH_DIR:-$OUTDIR}" "$OUTDIR" || true
+
 ###############################################################################
-# STEP 14 — Summary
+# STEP 15 — Summary
 ###############################################################################
 echo ""
 echo "=========================================="

@@ -161,7 +161,7 @@ General rule: a `VAR=$(... | grep -c/-q ...)` whose upstream command can fail to
 
 ### Output model: folder-symlink stages — don't symlink `build/`, and don't copy the symlinks
 
-The engines write the **bulk stage dirs** (`density/ equil/ prod/`, plus MD `heat/ [relax/]`) as **folder symlinks** `${OUTDIR}/<stage> → ${SCRATCH_DIR}/<stage>`, pre-created *before* mdrun so trajectories land on scratch without touching the pool (default `SYMLINK_BULK=1`; `SYMLINK_BULK=0` makes them real in `OUTDIR`). The transparency is the whole point — every stage-dir variable still reads `${OUTDIR}/<stage>`, so mdrun/grompp/analysis paths are unchanged. Three traps to keep in mind:
+The engines write the **bulk stage dirs** (`heat/ density/ equil/ prod/` for REMD/REST2, `heat/ density/ [relax/] prod/` for MD) as **folder symlinks** `${OUTDIR}/<stage> → ${SCRATCH_DIR}/<stage>`, pre-created *before* mdrun so trajectories land on scratch without touching the pool (default `SYMLINK_BULK=1`; `SYMLINK_BULK=0` makes them real in `OUTDIR`). The transparency is the whole point — every stage-dir variable still reads `${OUTDIR}/<stage>`, so mdrun/grompp/analysis paths are unchanged. Three traps to keep in mind:
 
 - **Never symlink `build/`** (or `em/`). `build/` must be **real in `OUTDIR`** or the `solvate`/`genion` topology `rename()` becomes cross-filesystem and dies (see the OUTDIR gotcha above). It's small; keep it real.
 - **The stage symlink must PRE-EXIST before mdrun**, created in the tree-setup block. If a later step does `mkdir -p "$STAGE_DIR"` on a path that isn't already the symlink, it creates a *real* dir in OUTDIR and the bulk lands on the pool. (MD's optional `relax/` is created the same conditional way inside STEP 6.)
@@ -325,3 +325,149 @@ term is affected — CMAP (CHARMM, AMBER ff19SB), polarization (Drude), tabulate
 `docs/FORCE_FIELDS.md` carries the rule and a GPU-free per-force-field check (diff the λ=1.0 and
 λ=0.5 topologies by section, then justify every unchanged section). Run it once per new force
 field; the `charmm*` guard catches only the case we knew about.
+
+---
+
+### GROMACS: restarting a density segment from a `.gro` silently loses the barostat's state
+
+The iterative NPT density stage runs as a chain of fixed-length segments. REMD and REST2 used
+to chain them with `grompp -c density_seg<N-1>.gro` and **no `-t`**; only MD passed the
+checkpoint. That is not equivalent.
+
+A `.gro` holds exactly three things: positions, velocities (at `%8.4f` nm/ps), and box vectors.
+A `.cpt` additionally holds the **integrator's internal state** — the V-rescale thermostat
+integral, the C-rescale barostat's box-scaling state, the RNG stream positions for both (both
+are stochastic), the running pressure-coupling averages, and the step/time counter. Given only
+`-c`, GROMACS resets all of that: `t=0`, `step=0`, fresh thermostat and barostat state, fresh
+RNG.
+
+Why it matters here specifically: **the barostat restarts cold at every segment boundary.** With
+no saved state, C-rescale's first scaling decision is driven by the *instantaneous* virial
+pressure, which fluctuates by several hundred bar in a solvated box — so each boundary gives the
+volume a small random kick. That kick lands directly in the quantity the convergence loop is
+measuring ("has the average volume stopped changing between segments?"), so part of the measured
+change was a restart artifact rather than physics.
+
+Two smaller consequences: `continuation = yes` is only strictly correct from a checkpoint (it
+tells mdrun the input already satisfies the constraints, but `.gro` velocity rounding leaves them
+satisfied only to ~1e-4, and `continuation = yes` tells mdrun not to fix it); and the time axis
+restarts at 0 in every segment, so the per-segment `.edr`/`.xtc` cannot be concatenated into one
+continuous trace.
+
+**Fix:** every segment resumes with `-t "$LAST_CPT"`, and `LAST_CPT` is threaded through the loop
+alongside `LAST_GRO`. Segment 1 resumes from `heat/heat.cpt`, which is why `HEAT_NS` must be `> 0`
+in all three engines.
+
+---
+
+### GROMACS: `grompp -r` is the POSRES reference — a moving one lets the restraint ratchet
+
+`define = -DPOSRES` activates the `[ position_restraints ]` block from `posre.itp`, putting a
+harmonic spring (k = 1000 kJ/mol/nm² by default) on each protein heavy atom, pulling it toward a
+**reference position**. Those reference positions come from `grompp -r`, *not* from `-c`.
+
+All three density loops used to pass `-r "$LAST_GRO"` — the previous segment's output. So each
+segment re-anchored the restraint to wherever the protein had already drifted. Within a segment
+an atom sits in a harmonic well of width √(kT/k) ≈ 0.5 Å RMS, and wherever it drifted to became
+the next segment's anchor.
+
+The restraint therefore resists **per-segment** displacement but never **cumulative**
+displacement. Random thermal excursions largely cancel (√N of something small). What does not
+cancel is any *systematic* force — the force field preferring a slightly different backbone than
+the designed pose. Against a fixed anchor the restraint balances that force; against a following
+anchor there is nothing to balance it, and the drift accumulates linearly over 8–20 segments.
+
+That matters for this project specifically, because RMSD-from-the-designed-pose is the headline
+metric and the density stage was spending part of that drift budget before production started
+and before the RMSD reference frame was set.
+
+**Fix:** a fixed `POSRES_REF="${EM_DIR}/em.gro"` for every restrained stage in all three engines.
+`refcoord-scaling = com` stays correct with a fixed reference — it scales the reference COM with
+the box under the barostat without distorting internal geometry.
+
+---
+
+### Density convergence: a consecutive-segment difference does not detect a slow drift
+
+The convergence test used to be `|V_n − V_{n−1}| / V_{n−1} <= DENSITY_TOL_REL`, evaluated once
+`seg >= DENSITY_MIN_SEG`. For a solvated box the segment-to-segment noise is far below that
+threshold — σ_V/V ≈ √(kT·κ/V) ≈ 2e-3 for a ~500 nm³ box, and the standard error of a 20 ps
+segment mean is smaller still — so the test passes readily, **including while the box is still
+shrinking steadily**. A sustained drift of 0.4 % per segment clears a 0.5 % threshold on every
+single comparison while the box contracts ~3 % across the window.
+
+**Fix:** `scripts/simulation/density_converged.py` fits a least-squares line through the trailing
+`DENSITY_MIN_SEG` segments and requires the drift that line accounts for *across the window* to
+be within tolerance. Random scatter has ~zero slope and still passes; a steady drift does not,
+however small each step is. Scatter itself is deliberately **not** part of the test — it is the
+physical volume fluctuation of an NPT box, not a sign of non-convergence. `parameters.txt` now
+records whether the stage ended at a plateau or at the `DENSITY_MAX_SEG` cap.
+
+---
+
+### GROMACS: constraint-failure dumps (`step*.pdb`) land in the SUBMIT DIRECTORY, not `OUTDIR`
+
+When LINCS/SETTLE reports an excessive deviation, `mdrun` writes a **pair** of PDBs —
+`step<N>b.pdb` ("initial coordinates") and `step<N>c.pdb` ("coordinates after constraining")
+— and logs `Wrote pdb files with previous and current coordinates`. Diffing the pair shows
+which bond blew up, so they are genuinely useful.
+
+The trap is **where** they go: GROMACS writes them to the process's **current working
+directory**, which it has no flag to change. For an sbatch that is the *submit directory*.
+So the files appear next to the submit scripts, nowhere near the `OUTDIR` of the job that
+made them, and with no job ID in the name — on a shared submit dir you cannot tell which
+run produced them.
+
+They are also **full-system** PDBs. Measured on `example/input_pdbs/1a22-fixed.pdb`
+(949 021 atoms): **75 MB each**, and EM alone dumped two pairs = 131 MB, dropped straight
+onto the tight-quota pool that the whole `SYMLINK_BULK` folder-symlink model exists to keep
+bulk *off*. A genuinely unstable run dumps far more.
+
+Note this is **not** a sign that the new heat stage is unsafe: it fires during **energy
+minimization** on strained input geometry (`1a22-fixed` does it reliably; `helix_fusion`
+never does), EM recovers, and the run continues. The archived MD run on the same structure,
+predating the heat-stage work, dumped identically.
+
+**Fix:** each engine does `cd "${SCRATCH_DIR:-$OUTDIR}"` once, **immediately before the EM
+step**, so dumps land where the bulk already goes. Safe because every path used after that
+point is absolute; SLURM opens its `-o`/`-e` files relative to the submit dir *before* the
+script body runs, so the job logs are unaffected; `$SLURM_SUBMIT_DIR` is an env var; and
+multi-replica `mdrun -multidir` chdirs each rank into its own rep dir regardless (so
+per-replica stages were never affected — only the serial `em`/`heat`/`density` steps).
+
+**The placement is load-bearing — this collides with the OUTDIR-filesystem gotcha above.**
+Putting the `cd` earlier (right after the stage dirs are created, which is the obvious spot)
+moves the cwd onto the scratch data volume *while `solvate`/`genion` are still running*, and
+their topology `rename()` is fatal across filesystems. Measured: the build dies 8 s in with
+`[ERROR] Failed at step 3` in `Solvating…`. During the build the cwd must stay on the same
+filesystem as the topology; every `mdrun` runs at or after EM, so just before EM is both late
+enough to be safe and early enough to catch every dump.
+
+**If you find stray `step*.pdb` next to the submit scripts,** they are from a run predating
+this fix. They are pure debug output and safe to delete once you no longer need the diff.
+
+**Moving them to scratch creates a second problem: nobody browses scratch.** A run that threw
+constraint failures and then finished would look perfectly clean, and — worse — a run that
+*failed* before `PRESERVE_FROM_STEP` would have its scratch cleaned by the ERR trap, deleting
+the very files needed to explain the failure. That is strictly worse than the old behaviour,
+where the dumps at least survived in the submit dir. Both halves are handled:
+
+- `report_crash_dumps.sh DUMP_DIR OUTDIR` runs at the end of every job. The bulky PDBs stay on
+  scratch; a small `OUTDIR/CONSTRAINT_FAILURES.txt` (count, which stage's log logged them, full
+  paths, and how to diff a b/c pair) plus a banner in the job log land where people actually
+  look. It deletes a stale report when a run is clean, so the file's presence always means
+  *this* run. Always exits 0 — diagnostics must never fail a good job.
+- On failure the ERR trap writes the report **before** cleaning, passing `deleted` so the report
+  says plainly that the PDBs went with the scratch dir and that `PRESERVE_SCRATCH_FROM=always`
+  would have kept them. The few-KB record survives in `OUTDIR` either way.
+
+**`PRESERVE_SCRATCH_FROM` is NOT overridden when dumps exist** — an earlier version of this fix
+did that, and it was wrong twice over. `never` has to mean never; and because a strained
+structure dumps during EM on *every* run (`1a22-fixed` does), "keep scratch whenever dumps
+exist" would silently disable the knob for that entire class of input and leave the whole
+multi-GB `density/equil/prod` tree behind, not just the 750 MB of dumps. The split is: the
+policy governs the bulky PDBs, the cheap metadata always survives in `OUTDIR`.
+
+**Reading the report:** dumps from `em/` are common and usually benign — strained input geometry
+that EM then recovers from (`1a22-fixed` does it every run; `helix_fusion` never does). Dumps
+from `heat/`, `density/` or production mean a simulation going unstable and deserve a look.

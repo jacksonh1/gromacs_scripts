@@ -167,7 +167,7 @@ exchanges; plain MD runs a single trajectory.
 | 11 | Write parameters log |
 | 12 | Post-analysis: acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
 
-Stage folders: `build/ → em/ → density/ → equil/ → prod/`. See
+Stage folders: `build/ → em/ → heat/ → density/ → equil/ → prod/`. See
 `scripts/simulation/REMD-output-guide.md` for a full description of all output files.
 
 ### Plain MD — `scripts/simulation/MD-gromacs.sbatch`
@@ -205,6 +205,30 @@ automatically adds the *PV* term to the replica-exchange Metropolis criterion (`
 unchanged). The constant-temperature interpretation is unaffected either way:
 `prod/rep000/remd.xtc` is still the lowest-temperature ensemble. Plain MD production is
 always NPT.
+
+**`REF_P` and `TAU_P` are not "NPT only", and they apply to all three engines.** The
+`density/` stage runs the barostat in every engine and under *both* ensembles — that stage
+is what determines the box size. So `REF_P` (default `1.0` bar) is the pressure the box was
+equilibrated at no matter what `ENSEMBLE` is set to.
+
+All `ENSEMBLE` controls is whether the barostat keeps running in the stages after
+`density/`:
+
+| | `density/` | `equil/` and `prod/` |
+|---|---|---|
+| `ENSEMBLE=NPT` | barostat on at `REF_P` | barostat on at `REF_P` |
+| `ENSEMBLE=NVT` | barostat on at `REF_P` | barostat **off** — box frozen at whatever `density/` ended on |
+
+So `REF_P` still matters under NVT: it sets the pressure the frozen box was equilibrated
+at. `REF_P=10` with `ENSEMBLE=NVT` gives a constant-volume run in a box the size water
+would occupy at 10 bar.
+
+`TAU_P` (default `2.0` ps) is the C-rescale coupling time. C-rescale is thermodynamically
+consistent — unlike Berendsen it reproduces the correct NPT distribution at *any*
+`tau-p` — so this sets how fast the volume relaxes, not which ensemble is sampled. Keep it
+at or above ~1 ps: the pressure autocorrelation time is only 0.1–0.5 ps, so a shorter
+`tau-p` makes the barostat chase instantaneous virial noise, and in `density/` (where
+`-DPOSRES` is on) that rescaling does spurious work against the restraints.
 
 ---
 
@@ -249,7 +273,8 @@ force field needs scaled — run it once before any production REST2 run.
 
 **Output model (folder-symlink).** Small, laptop-worthy dirs (`build/ em/ analysis/
 logs/`, `parameters.txt`, final PDB) stay **real** in `OUTDIR`. The bulk stage dirs
-(`prod/ equil/ density/`, plus `heat/ relax/` for MD) are **folder symlinks into
+(`heat/ density/ equil/ prod/` for REMD/REST2; `heat/ density/ [relax/] prod/`
+for MD) are **folder symlinks into
 scratch** (`SCRATCH_DIR` under `SCRATCH_ROOT`), so mdrun writes the large trajectories
 straight onto scratch — the tight-quota pool is never touched and a laptop rsync of
 `OUTDIR` sees only a few broken folder-links instead of thousands of file-links.

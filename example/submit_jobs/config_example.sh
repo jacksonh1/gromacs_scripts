@@ -14,8 +14,8 @@ T_MAX=450
 TOTAL_NS=2                           # ns per replica
 REPLEX_PS=1                       # exchange attempt interval (ps)
 ENSEMBLE=NVT                         # NVT (constant volume) | NPT (C-rescale barostat)
-# REF_P="1.0"                         # bar (NPT only)
-# TAU_P="1.0"                         # ps  (NPT only)
+# REF_P="1.0"                         # bar (barostat reference pressure; density/ uses it under NVT too)
+# TAU_P="2.0"                         # ps  (barostat coupling time; keep >= 1)
 # TEMPS_LIST=""                       # override: "300.0,305.2,310.5,..."
 
 # ── Input ────────────────────────────────────────────────────────────────────
@@ -51,6 +51,7 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 
 # ── Equilibration ────────────────────────────────────────────────────────────
+# HEAT_NS="0.2"                       # NVT thermalization at T_MIN (ns); must be > 0
 # EQUIL_NS="0.2"                      # per-replica equilibration (ns)
 # DENSITY_SEG_STEPS=10000             # steps per density-equilibration segment
 # DENSITY_MIN_SEG=8                   # min segments before convergence check

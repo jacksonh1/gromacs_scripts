@@ -20,13 +20,14 @@ outputs/output_T-REMD-gromacs/DB2_unbound-5ns-REMD-300-450K-48reps-NVT/
 OUTDIR/
 ├── build/                        # Step 3 — System building            [REAL]
 ├── em/                           # Step 4 — Energy minimization         [REAL]
-├── analysis/                     # Step 12 — Post-analysis outputs      [REAL]
-├── density/  ─▶ scratch          # Step 5 — NPT density equilibration   [SYMLINK]
-├── equil/    ─▶ scratch          # Steps 6–7 — Per-replica equilibration (NVT, or NPT if ENSEMBLE=NPT)
+├── analysis/                     # Step 13 — Post-analysis outputs      [REAL]
+├── heat/     ─▶ scratch          # Step 5 — NVT thermalization at T_MIN  [SYMLINK]
+├── density/  ─▶ scratch          # Step 6 — NPT density equilibration   [SYMLINK]
+├── equil/    ─▶ scratch          # Steps 7–8 — Per-replica equilibration (NVT, or NPT if ENSEMBLE=NPT)
 │   ├── rep000/                   #            (each rep dir + its remd/equil.xtc lives on scratch)
 │   ├── rep001/
 │   └── ... (one per replica)
-├── prod/     ─▶ scratch          # Steps 8–9 — REMD production          [SYMLINK]
+├── prod/     ─▶ scratch          # Steps 9–10 — REMD production         [SYMLINK]
 │   ├── rep000/                   #   rep000/remd.xtc = the 300 K ensemble (analyze directly)
 │   ├── rep001/
 │   └── ... (one per replica)
@@ -37,17 +38,17 @@ OUTDIR/
 
 **Output model (folder-symlink).** The small, laptop-worthy dirs (`build/ em/
 analysis/ logs/`, `parameters.txt`, the final PDB) are **real** in `OUTDIR`. The bulk
-stage dirs (`density/ equil/ prod/`) are **folder symlinks into scratch**
+stage dirs (`heat/ density/ equil/ prod/`) are **folder symlinks into scratch**
 (`SCRATCH_DIR`), created before the run so mdrun writes trajectories and per-replica
 intermediates straight onto scratch — the tight-quota pool is never touched, and a
-laptop rsync of `OUTDIR` sees just 3 broken folder-links (harmless; `--exclude` them or
+laptop rsync of `OUTDIR` sees just 4 broken folder-links (harmless; `--exclude` them or
 leave them). Analysis reads the trajectory through the `prod/` symlink, so no path
 changes are needed. On success the run copies the real dirs into `SCRATCH_DIR` too, so
 the scratch archive is a self-contained record.
 
 Set **`SYMLINK_BULK=0`** to disable this: the stage dirs are then **real in `OUTDIR`**
 with no scratch offload (use when `OUTDIR` is already on a large disk). Everything else
-in this guide is identical either way — only whether `density/ equil/ prod/` are
+in this guide is identical either way — only whether `heat/ density/ equil/ prod/` are
 symlinks vs real changes.
 
 ---
@@ -97,9 +98,29 @@ Relaxes clashes and strained geometry from system building. No dynamics — atom
 
 ---
 
-### `density/` — NPT Density Equilibration (Step 5)
+### `heat/` — NVT Thermalization (Step 5)
 
-Equilibrates system density at the lowest replica temperature (`T_MIN`) under constant pressure. Runs iteratively (up to `DENSITY_MAX_SEG` segments) until volume converges.
+Generates velocities and thermalizes at `T_MIN` at **constant volume**, with protein heavy atoms position-restrained to the minimized structure. This runs before the barostat is ever switched on: starting C-rescale directly from a minimized configuration means its first scaling decisions are driven by an instantaneous virial pressure far from equilibrium.
+
+| File | Description |
+|------|-------------|
+| `heat.mdp` | Parameters (V-rescale thermostat, `pcoupl = no`, `-DPOSRES`) |
+| `heat.tpr` | Run input |
+| `heat.log` / `heat.edr` | GROMACS mdrun log and energies |
+| `heat.gro` / `heat.cpt` | Final structure and checkpoint — `density/` segment 1 resumes from both |
+| `grompp.log` | `grompp` log |
+
+Length is `HEAT_NS` (default 0.2 ns) and must be `> 0`, since `density/` resumes from `heat.cpt`.
+
+---
+
+### `density/` — NPT Density Equilibration (Step 6)
+
+Equilibrates system density at the lowest replica temperature (`T_MIN`) under constant pressure, continuing from `heat/`. Runs iteratively (up to `DENSITY_MAX_SEG` segments) until the volume plateaus.
+
+Every segment resumes from the previous one's **checkpoint** (`grompp -t`), so the V-rescale and C-rescale internal state and RNG streams carry across the boundary rather than the barostat restarting cold each time. Position restraints are anchored to the **minimized** structure (`em/em.gro`) for every segment — a moving reference would resist per-segment displacement but never cumulative drift away from the designed pose.
+
+Convergence is a slope test over the trailing `DENSITY_MIN_SEG` segments, not a last-two-segments comparison — see `docs/PARAMETERS.md`.
 
 | File | Description |
 |------|-------------|
@@ -118,7 +139,7 @@ Equilibrates system density at the lowest replica temperature (`T_MIN`) under co
 
 ---
 
-### `equil/rep<NNN>/` — Per-Replica Equilibration (Steps 6–7)
+### `equil/rep<NNN>/` — Per-Replica Equilibration (Steps 7–8)
 
 Each replica equilibrates at its own target temperature. Velocities are freshly generated for each replica. Constant volume by default (`ENSEMBLE=NVT`); with `ENSEMBLE=NPT` this stage also runs the C-rescale barostat so each replica relaxes its box at its own temperature before production.
 
@@ -136,7 +157,7 @@ Each replica equilibrates at its own target temperature. Velocities are freshly 
 
 ---
 
-### `prod/rep<NNN>/` — REMD Production (Steps 8–9)
+### `prod/rep<NNN>/` — REMD Production (Steps 9–10)
 
 The actual T-REMD simulation. Replicas run simultaneously and attempt coordinate exchanges every `REPLEX_PS` ps.
 

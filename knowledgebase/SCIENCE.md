@@ -56,6 +56,17 @@ Position restraints (`-DPOSRES`) held through EM/heat/density to preserve the
 input pose, released at production start (or after an optional unrestrained
 `relax/` stage if `RELAX_NS>0`). Mainly bound-state equilibrium sampling.
 
+## Equilibration (all engines)
+
+`em/ → heat/ → density/`, restrained throughout, with the position-restraint reference
+fixed at the minimized structure so the restraint cannot ratchet along behind a drifting
+protein. `heat/` is NVT at `T_MIN` and generates the velocities; the barostat is only
+switched on afterwards, in `density/`, so C-rescale never starts from a minimized
+configuration whose instantaneous virial pressure is far from equilibrium. `density/`
+iterates fixed-length NPT segments — each resuming from the previous segment's checkpoint,
+so the thermostat/barostat state and RNG streams carry across — until the volume plateaus
+(slope test over the trailing `DENSITY_MIN_SEG` segments; see `docs/PARAMETERS.md`).
+
 ## Ensembles
 
 - **REMD production:** NVT (default, constant volume) or NPT (`ENSEMBLE=NPT`,

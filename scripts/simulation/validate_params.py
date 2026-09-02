@@ -34,13 +34,20 @@ _SHARED_JOB = {
     "DENSITY_SEG_STEPS", "DENSITY_MIN_SEG", "DENSITY_MAX_SEG", "DENSITY_TOL_REL",
     "PRESERVE_SCRATCH_FROM", "SYMLINK_BULK", "SCRATCH_DIR", "SCRATCH_ROOT", "GMX",
     "SEED",
+    # REF_P/TAU_P are shared for the same reason: all three engines run a pressure-coupled
+    # density stage, so both apply even when ENSEMBLE=NVT freezes the box afterwards.
+    "REF_P", "TAU_P",
+    # HEAT_NS is shared: all three engines now run the SAME stage under that name — NVT
+    # thermalization at T_MIN from em.gro, restrained, velocities generated there — before
+    # the barostat is switched on in density/. (It used to be MD-only, when REMD/REST2
+    # generated velocities inside their first density segment instead.)
+    "HEAT_NS",
 }
-# EQUIL_NS (REMD per-replica equil) and HEAT_NS (MD NVT heat) are NOT shared: the same
-# clock means a different stage per engine, so each engine names its own (see CLAUDE.md
-# cross-engine audit). Likewise EQ_NPT_NS → RELAX_NS is MD-only.
-_REMD_JOB = {"FORCE", "REPLICAS", "NTOMP_SERIAL", "T_MIN", "T_MAX", "TEMPS_LIST", "REPLEX_PS",
-             "EQUIL_NS", "ENSEMBLE", "REF_P", "TAU_P"}
-_MD_JOB = {"T_SIM", "TRAJ_PS", "HEAT_NS", "RELAX_NS", "NTOMP"}
+# EQUIL_NS (REMD/REST2 per-replica equil) is NOT shared: MD has no such stage. Likewise
+# EQ_NPT_NS → RELAX_NS is MD-only. See the CLAUDE.md cross-engine audit.
+_REMD_JOB = {"REPLICAS", "NTOMP_SERIAL", "T_MIN", "T_MAX", "TEMPS_LIST", "REPLEX_PS",
+             "EQUIL_NS", "ENSEMBLE"}
+_MD_JOB = {"T_SIM", "TRAJ_PS", "RELAX_NS", "NTOMP"}
 # REST2 uses the same job params as REMD (T_MAX = EFFECTIVE max solute temp, but the
 # type/range checks are identical: > 0, T_MAX > T_MIN, REPLICAS >= 2, …).
 _REST2_JOB = _REMD_JOB
@@ -122,6 +129,15 @@ def validate_values(engine):
     # ── shared numeric ──
     for name in ("DT_PS", "CUTOFF_NM", "GAMMA_LN", "BOX_BUFFER", "TOTAL_NS", "DENSITY_TOL_REL"):
         positive(name)
+    # HEAT_NS > 0, not >= 0: every engine's density stage resumes from heat/heat.cpt, so a
+    # zero-length heat stage leaves the run with no thermalized state to continue from.
+    positive("HEAT_NS")
+    # Barostat settings are shared, not REMD-only: the density stage is pressure-coupled in
+    # all three engines regardless of ENSEMBLE (it is what sets the box), so REF_P/TAU_P
+    # always apply somewhere. ENSEMBLE only controls the stages AFTER density/: NPT keeps the
+    # barostat on in equil/+prod/, NVT turns it off and freezes the box density/ ended on.
+    positive("REF_P")
+    positive("TAU_P")
     nmin = positive("DENSITY_MIN_SEG", integer=True)
     nmax = positive("DENSITY_MAX_SEG", integer=True)
     positive("DENSITY_SEG_STEPS", integer=True)
@@ -156,14 +172,11 @@ def validate_values(engine):
     # REST2 shares REMD's parameter set and checks (T_MAX is the EFFECTIVE max solute
     # temperature but validated identically: > 0 and > T_MIN).
     if engine in ("remd", "rest2"):
-        flag01("FORCE")
         positive("REPLEX_PS")
         positive("EQUIL_NS", allow_zero=True)
         ens = env.get("ENSEMBLE", "")
         if ens not in ("", "NVT", "NPT"):
             errs.append(f"[ERROR] ENSEMBLE must be NVT or NPT (got '{ens}')")
-        positive("REF_P")
-        positive("TAU_P")
         tmin = positive("T_MIN")
         tmax = positive("T_MAX")
         if tmin is not None and tmax is not None and tmax <= tmin:
@@ -183,7 +196,6 @@ def validate_values(engine):
     else:  # md
         positive("T_SIM")
         positive("TRAJ_PS")
-        positive("HEAT_NS", allow_zero=True)
         positive("RELAX_NS", allow_zero=True)
         nt = positive("NTOMP", integer=True)
         if nt is not None and nt < 1:

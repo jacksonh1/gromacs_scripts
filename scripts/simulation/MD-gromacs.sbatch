@@ -126,6 +126,17 @@ else
 fi
 GAMMA_LN="${GAMMA_LN:-2.0}"               # ps^-1  (tau_t = 1/gamma)
 
+# Barostat settings, shared with the REMD/REST2 engines so a density stage equilibrated
+# by one is comparable with the other (MD has no ENSEMBLE switch — density/, relax/ and
+# prod/ are all pressure-coupled).
+REF_P="${REF_P:-1.0}"                     # bar
+# tau-p 2.0: C-rescale samples the correct NPT distribution at any tau-p (unlike
+# Berendsen, which under-fluctuates the volume), so this sets the volume's relaxation
+# time, not the ensemble. Below ~1 ps the barostat starts chasing instantaneous virial
+# noise (pressure autocorrelation is 0.1-0.5 ps), which does spurious work against the
+# position restraints in density/. 2-5 ps is the usual GROMACS range.
+TAU_P="${TAU_P:-2.0}"                     # ps
+
 # RNG seed. -1 (default) = GROMACS draws a fresh random seed per run (legacy behaviour).
 # Set SEED>=0 to pin the setup: velocity generation (heat) and the stochastic
 # V-rescale/C-rescale streams. NOTE: GPU runs are still not bit-for-bit reproducible
@@ -152,7 +163,7 @@ NTOMP="${NTOMP:-${SLURM_CPUS_PER_TASK:-8}}"
 # params so validate_params.py reads them from the environment (covers config- and
 # --export-set values alike). Keep this list in sync with validate_params.py.
 export PDB_IN OUTBASE OUTDIR FF WATER BOX_SHAPE BOX_BUFFER NEUTRALIZE SALT_MOLAR \
-       DT_PS T_SIM CUTOFF_NM GAMMA_LN TOTAL_NS TRAJ_PS HEAT_NS DENSITY_SEG_STEPS \
+       DT_PS T_SIM CUTOFF_NM GAMMA_LN REF_P TAU_P TOTAL_NS TRAJ_PS HEAT_NS DENSITY_SEG_STEPS \
        DENSITY_MIN_SEG DENSITY_MAX_SEG DENSITY_TOL_REL RELAX_NS NTOMP PRESERVE_SCRATCH_FROM SYMLINK_BULK SEED
 python3 "$VALIDATE_PARAMS" --engine md
 
@@ -195,10 +206,19 @@ fi
 cleanup_scratch_on_error() {
   local rc=$?
   if [[ -n "$SCRATCH_DIR" && -d "$SCRATCH_DIR" ]]; then
+    # PRESERVE_SCRATCH_FROM decides the fate of the scratch dir, full stop — an explicit
+    # policy is not overridden here, and "never" means never. Constraint-failure dumps
+    # (step*.pdb, in the cwd = SCRATCH_DIR since EM) are only 75 MB each next to a scratch
+    # tree that can be many GB, and on a strained structure EM dumps on EVERY run, so
+    # keeping scratch whenever dumps exist would quietly disable the knob for that whole
+    # class of input. Instead: always write the few-KB report into OUTDIR so the failure
+    # stays on record, and let the policy govern the bulky PDBs.
     if (( CURRENT_STEP >= PRESERVE_FROM_STEP )); then
       echo "[ERROR] Failed at step $CURRENT_STEP (rc=$rc); PRESERVING scratch: $SCRATCH_DIR"
+      bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "$SCRATCH_DIR" "$OUTDIR" retained || true
     else
       echo "[ERROR] Failed at step $CURRENT_STEP (rc=$rc); cleaning scratch: $SCRATCH_DIR"
+      bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "$SCRATCH_DIR" "$OUTDIR" deleted || true
       rm -rf "$SCRATCH_DIR"
     fi
   fi
@@ -230,6 +250,7 @@ for stage in heat density prod; do
     mkdir -p "${OUTDIR}/${stage}"
   fi
 done
+
 
 [[ -f "$PDB_IN" ]] || { echo "[ERROR] PDB not found: $PDB_IN"; exit 1; }
 
@@ -304,6 +325,24 @@ SYS_GRO="${BUILD}/${OUTBASE}_ions.gro"
 SYS_TOP="${BUILD}/${OUTBASE}.top"
 [[ -f "$SYS_GRO" && -f "$SYS_TOP" ]] || { echo "[ERROR] System build failed"; exit 1; }
 echo "[OK] System built"
+
+# ── Where GROMACS drops its crash dumps ──────────────────────────────────────
+# On a constraint failure mdrun writes step<N>b.pdb / step<N>c.pdb (coordinates before
+# and after constraining) into the CURRENT WORKING DIRECTORY — which for an sbatch is the
+# submit directory, not the job's OUTDIR. On a large system those are ~75 MB *each*, so a
+# strained input silently drops hundreds of MB next to the submit scripts on the
+# tight-quota pool. Move cwd to where the bulk already goes, so dumps land with the job.
+#
+# THIS MUST COME AFTER THE BUILD STEP, NOT BEFORE IT. solvate/genion finish their topology
+# edit with a rename() that is fatal across filesystems, so while they run the cwd has to
+# stay on the same filesystem as the topology (see the OUTDIR-filesystem gotcha). Moving
+# this above the build makes STEP 3 die in solvate. Every mdrun runs at or after EM, so
+# here is early enough to catch them all.
+#
+# Otherwise safe: every path used below is absolute; SLURM opened its -o/-e files relative
+# to the submit dir before this script body started; $SLURM_SUBMIT_DIR is an env var; and
+# multi-replica mdrun (-multidir) chdirs each rank into its own rep dir regardless.
+cd "${SCRATCH_DIR:-$OUTDIR}"
 
 ###############################################################################
 # STEP 3 — Energy minimization
@@ -412,7 +451,7 @@ $GMX mdrun \
   -ntomp "$NTOMP" -nb gpu -pme gpu -bonded gpu -pin on \
   > "${OUTDIR}/logs/mdrun_heat.log" 2>&1
 
-[[ -f "${HEAT_DIR}/heat.gro" ]] || { echo "[ERROR] Heat step failed"; exit 1; }
+[[ -f "${HEAT_DIR}/heat.gro" && -f "${HEAT_DIR}/heat.cpt" ]] || { echo "[ERROR] Heat step failed (no heat.gro/heat.cpt). The density stage resumes from heat.cpt, so HEAT_NS must be > 0."; exit 1; }
 echo "[OK] Heat step done"
 
 ###############################################################################
@@ -422,9 +461,17 @@ CURRENT_STEP=5
 echo "===== STEP 5: NPT density equilibration (iterative) ====="
 
 DENSITY_DIR="${OUTDIR}/density"
+# Position-restraint reference for every segment. It is the MINIMIZED structure (the same
+# one the heat step anchored to) and it never changes: grompp -r sets the coordinates the
+# harmonic restraints pull toward, so passing the previous segment's output (as this loop
+# used to) re-anchors the restraint to wherever the protein has already drifted. That
+# resists per-segment displacement but never CUMULATIVE displacement — any systematic
+# force pulling the structure off the designed pose then accumulates unopposed across
+# 8–20 segments, before production has started and before the RMSD reference frame is set.
+POSRES_REF="${EM_DIR}/em.gro"
 LAST_GRO="${HEAT_DIR}/heat.gro"
 LAST_CPT="${HEAT_DIR}/heat.cpt"
-prev_vol=""
+volumes=()
 seg=0
 
 while (( seg < DENSITY_MAX_SEG )); do
@@ -454,8 +501,8 @@ ref-t       = ${T_SIM} ${T_SIM}
 
 pcoupl      = C-rescale
 pcoupltype  = isotropic
-tau-p       = 1.0
-ref-p       = 1.0
+tau-p       = ${TAU_P}
+ref-p       = ${REF_P}
 compressibility = 4.5e-5
 refcoord-scaling = com
 
@@ -472,7 +519,7 @@ EOF
   $GMX grompp \
     -f "${DENSITY_DIR}/density_seg${seg}.mdp" \
     -c "$LAST_GRO" \
-    -r "$LAST_GRO" \
+    -r "$POSRES_REF" \
     -t "$LAST_CPT" \
     -p "$SYS_TOP" \
     -o "${DENSITY_DIR}/density_seg${seg}.tpr" \
@@ -494,30 +541,30 @@ EOF
 
   vol_avg=$(awk '!/^[#@]/ {sum+=$2; n++} END {if(n>0) printf "%.6f", sum/n}' \
             "${DENSITY_DIR}/volume_seg${seg}.xvg")
+  # A missing/empty volume would otherwise reach density_converged.py as an empty argv
+  # entry and die there as an argparse error about a float, several layers from the cause.
+  [[ -n "$vol_avg" ]] || { echo "[ERROR] no Volume in ${DENSITY_DIR}/volume_seg${seg}.xvg — did 'gmx energy' fail for segment ${seg}?"; exit 1; }
   echo "[INFO] Segment $seg average volume: ${vol_avg} nm^3"
+  volumes+=("$vol_avg")
 
-  if [[ -n "$prev_vol" ]]; then
-    rel_change=$(python3 -c "
-prev=$prev_vol; curr=$vol_avg
-print(abs(curr-prev)/prev if prev!=0 else 1.0)
-")
-    echo "[INFO] Relative volume change: $rel_change"
-
-    if (( seg >= DENSITY_MIN_SEG )); then
-      converged=$(python3 -c "print(0 if float('$rel_change')>float('${DENSITY_TOL_REL}') else 1)")
-      if (( converged )); then
-        echo "[INFO] Density converged at segment $seg"
-        break
-      fi
-    fi
+  # Plateau test over the trailing DENSITY_MIN_SEG segments, not a consecutive-segment
+  # difference: the old test compared only V_n against V_{n-1}, which a steady drift of
+  # just under DENSITY_TOL_REL per segment passes on every comparison while the box keeps
+  # contracting several percent overall. See density_converged.py.
+  conv_line=$(python3 "${GROMACS_SCRIPTS_DIR}/density_converged.py" \
+                --tol "$DENSITY_TOL_REL" --min-seg "$DENSITY_MIN_SEG" "${volumes[@]}")
+  converged="${conv_line%% *}"            # leading verdict: 1 = converged, 0 = not
+  echo "[INFO] density: ${conv_line#* }"  # trailing reason, next to the volumes above
+  if (( converged )); then
+    echo "[INFO] Density converged at segment $seg"
+    break
   fi
 
-  prev_vol="$vol_avg"
   LAST_GRO="${DENSITY_DIR}/density_seg${seg}.gro"
   LAST_CPT="${DENSITY_DIR}/density_seg${seg}.cpt"
 done
 
-if (( seg == DENSITY_MAX_SEG )); then
+if (( ! converged )); then
   echo "[WARNING] Reached DENSITY_MAX_SEG=${DENSITY_MAX_SEG} without convergence; using last segment"
 fi
 
@@ -574,8 +621,8 @@ ref-t       = ${T_SIM} ${T_SIM}
 
 pcoupl      = C-rescale
 pcoupltype  = isotropic
-tau-p       = 1.0
-ref-p       = 1.0
+tau-p       = ${TAU_P}
+ref-p       = ${REF_P}
 compressibility = 4.5e-5
 
 constraints = h-bonds
@@ -646,8 +693,8 @@ ref-t       = ${T_SIM} ${T_SIM}
 
 pcoupl      = C-rescale
 pcoupltype  = isotropic
-tau-p       = 1.0
-ref-p       = 1.0
+tau-p       = ${TAU_P}
+ref-p       = ${REF_P}
 compressibility = 4.5e-5
 
 constraints = h-bonds
@@ -749,7 +796,7 @@ RNG seed: $SEED$( [[ "$SEED" == "-1" ]] && echo " (random per run)" || echo " (f
 Trajectory frame interval (ps): $TRAJ_PS
 Production steps: $PROD_NSTEPS
 Heat ns: $HEAT_NS
-Density convergence segments: $seg
+Density convergence segments: $seg$( (( converged )) && echo " (plateau reached)" || echo " (DENSITY_MAX_SEG cap — NOT converged)" )
 Relax (unrestrained NPT) ns: $RELAX_NS  (0 = disabled; restraints released at production start)
 Production ensemble: NPT (V-rescale + C-rescale)
 OMP threads: $NTOMP
@@ -800,6 +847,14 @@ if [[ -n "$SCRATCH_DIR" ]]; then
 else
   echo "===== STEP 11: SYMLINK_BULK=0 — bulk is real in OUTDIR; no scratch archive to finalize ====="
 fi
+
+# ── Constraint-failure check ─────────────────────────────────────────────────
+# Dumps live on scratch (cwd since EM) so they stay off the tight-quota pool, but
+# nobody browses scratch — so surface them in OUTDIR and in this log. Writes
+# OUTDIR/CONSTRAINT_FAILURES.txt only when there are dumps, and clears a stale one
+# otherwise, so the file's presence always refers to THIS run.
+echo "[CMD] bash ${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh ${SCRATCH_DIR:-$OUTDIR} $OUTDIR"
+bash "${GROMACS_SCRIPTS_DIR}/report_crash_dumps.sh" "${SCRATCH_DIR:-$OUTDIR}" "$OUTDIR" || true
 
 ###############################################################################
 # STEP 12 — Summary

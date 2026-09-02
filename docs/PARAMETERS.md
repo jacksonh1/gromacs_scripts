@@ -85,12 +85,15 @@ list, and `validate_params.py`'s allowlist + rules.
 | `DT_PS` | `0.002` | Integration timestep, ps. |
 | `CUTOFF_NM` | `1.0` | Non-bonded cutoff, nm. **Forced to `1.2` when `FF=charmm*`** (with an `[INFO]` notice). |
 | `GAMMA_LN` | `2.0` | Thermostat coupling `tau_t`, ps⁻¹. |
+| `REF_P` | `1.0` | Barostat reference pressure, bar. **Not "NPT only":** `density/` is pressure-coupled in all three engines, so this is the reference pressure of the box production inherits — under `ENSEMBLE=NVT` that box is then frozen at `REF_P`. |
+| `TAU_P` | `2.0` | Barostat coupling time, ps. C-rescale samples the correct NPT distribution at *any* `tau-p`, so this sets the volume's relaxation time, not the ensemble — see below. |
 | `TOTAL_NS` | `20` (REMD/REST2), `100` (MD) | Production length per replica / per trajectory, ns. |
 | `SEED` | `-1` | `-1` = fresh random seed per run. `>= 0` pins `gen-seed`/`ld-seed`/`mdrun -reseed` (per-replica `SEED+i`). **Does not give bit-for-bit GPU trajectories** — it pins the setup and RNG streams only. |
+| `HEAT_NS` | `0.2` | NVT thermalization at `T_MIN` (restrained; velocities are generated here), ns. Runs before the barostat is switched on, so `density/` starts from a thermalized box. Must be `> 0` — `density/` resumes from `heat/heat.cpt`. |
 | `DENSITY_SEG_STEPS` | `10000` | Steps per NPT density-equilibration segment. |
-| `DENSITY_MIN_SEG` | `8` | Minimum segments before the convergence check. Must be `<= DENSITY_MAX_SEG`. |
+| `DENSITY_MIN_SEG` | `8` | Trailing window for the plateau test, in segments; also the earliest segment at which convergence may be declared. Must be `<= DENSITY_MAX_SEG`. |
 | `DENSITY_MAX_SEG` | `20` | Maximum segments. |
-| `DENSITY_TOL_REL` | `0.005` | Relative volume-change tolerance for convergence. |
+| `DENSITY_TOL_REL` | `0.005` | Convergence tolerance: the maximum *fractional volume drift* a least-squares line may account for across the trailing `DENSITY_MIN_SEG` segments. This is a plateau test, not a consecutive-segment difference — see below. |
 | `SYMLINK_BULK` | `1` | `1` = bulk stage dirs are folder symlinks into scratch (quota-safe). `0` = everything real in `OUTDIR`, no scratch offload. |
 | `SCRATCH_ROOT` | `/tmp` (overridden in `site_config.sh`) | Root for the per-job scratch directory. ~100 GB per job. |
 | `SCRATCH_DIR` | derived from `SCRATCH_ROOT` | Override the exact scratch path. |
@@ -108,10 +111,7 @@ list, and `validate_params.py`'s allowlist + rules.
 | `REPLEX_PS` | `1.0` | Exchange-attempt interval, ps. **Never set below 1.0** — see the warning below. |
 | `EQUIL_NS` | `0.2` | Per-replica equilibration before production, ns. `0` allowed. |
 | `ENSEMBLE` | `NVT` | `NVT` (constant volume) or `NPT` (C-rescale barostat). Under NPT, GROMACS adds the *PV* term to the exchange criterion automatically. |
-| `REF_P` | `1.0` | Reference pressure, bar (NPT only). |
-| `TAU_P` | `1.0` | Barostat coupling time, ps (NPT only). |
 | `NTOMP_SERIAL` | `min(node cores, 8)` | OpenMP threads for the single-rank setup steps (EM, density). |
-| `FORCE` | `0` | `0`/`1`. Overwrite an existing `OUTDIR`. |
 
 > **`REPLEX_PS` below 1.0 deadlocks GPU-resident REMD.** At 0.5 ps the job hangs
 > mid-run with clean physics (CPUs 100 %, GPUs 0 %) — an MPI collective deadlock at
@@ -125,11 +125,42 @@ list, and `validate_params.py`'s allowlist + rules.
 |---|---|---|
 | `T_SIM` | `300` | Production temperature, K. |
 | `TRAJ_PS` | `10` | Trajectory write interval, ps. |
-| `HEAT_NS` | `0.2` | NVT thermalization (restrained; velocities generated here), ns. `0` allowed. |
 | `RELAX_NS` | `0` | Optional unrestrained NPT relaxation before production, ns. `0` (default) releases restraints **at the start of production**, so the trajectory captures the protein relaxing away from the input pose. Set `> 0` to start production pre-relaxed — e.g. for bound-state sampling. |
 | `NTOMP` | `$SLURM_CPUS_PER_TASK`, else `8` | OpenMP threads. `>= 1`. |
 
 Production is always NPT.
+
+## Density-equilibration convergence
+
+> **On `TAU_P`.** C-rescale (stochastic cell rescaling) is thermodynamically consistent:
+> unlike Berendsen, which systematically under-fluctuates the volume, it reproduces the
+> correct NPT distribution for any coupling time. `TAU_P` therefore sets how fast the
+> volume relaxes and how its fluctuations are distributed in time — not *what* ensemble
+> is sampled. The reason not to go below ~1 ps is that the pressure autocorrelation time
+> is only 0.1–0.5 ps, so a short `tau-p` makes the barostat chase instantaneous virial
+> noise, and in `density/` (where `-DPOSRES` is on and `refcoord-scaling = com`) that
+> rescaling does spurious work against the restraints. 2–5 ps is the usual GROMACS range;
+> the default is 2.0.
+
+
+All three engines share one iterative NPT density stage: fixed-length segments, each
+resuming from the previous segment's checkpoint, until the box volume plateaus or
+`DENSITY_MAX_SEG` is reached.
+
+Convergence is a **slope test over the trailing `DENSITY_MIN_SEG` segments**
+(`scripts/simulation/density_converged.py`), not a comparison of the last two segments.
+A least-squares line is fitted through the window and the run stops when the drift that
+line accounts for across the window is `<= DENSITY_TOL_REL`.
+
+The consecutive-segment test it replaced was too weak to catch a slowly shrinking box:
+segment-to-segment noise in a solvated box is well under 0.5 %, so a *sustained* drift of
+just under `DENSITY_TOL_REL` per segment cleared the threshold on every single comparison
+while the box contracted several percent overall. Random scatter has ~zero slope and still
+passes; scatter itself is deliberately not part of the test, since it is the physical
+volume fluctuation of an NPT box rather than a sign of non-convergence.
+
+`parameters.txt` records the segment count and whether it ended at a plateau or at the
+`DENSITY_MAX_SEG` cap.
 
 ## REST2 only (`REST2-gromacs.sbatch`)
 

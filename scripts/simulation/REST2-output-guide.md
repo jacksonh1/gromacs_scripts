@@ -30,16 +30,17 @@ outputs/output_REST2/helix_fusion-20ns-REST2-300-450Keff-24reps-NVT-exf-1ps/
 OUTDIR/
 ├── build/                        # Step 3  — System building                     [REAL]
 ├── em/                           # Step 4  — Energy minimization                  [REAL]
-├── topol/                        # Step 6  — Per-replica SCALED topologies        [REAL]
+├── topol/                        # Step 7  — Per-replica SCALED topologies        [REAL]
 │   ├── processed.top             #           grompp -pp expansion (unscaled)
 │   ├── marked.top                #           protein atom types tagged "_" (mark_hot_region.py)
 │   └── topol_rep000.top … NNN    #           plumed partial_tempering lambda_i  (rep000 = lambda 1)
 ├── analysis/                     # Post-analysis (rep000)                         [REAL]
 ├── logs/                         # mdrun stdout logs (incl. mdrun_preflight.log)  [REAL]
-├── density/  ─▶ scratch          # Step 5  — NPT density equilibration (iterative)  [SYMLINK]
-├── equil/    ─▶ scratch          # Steps 7–8 — Per-replica equilibration (all at T_MIN, scaled H)
+├── heat/     ─▶ scratch          # Step 5  — NVT thermalization at T_MIN           [SYMLINK]
+├── density/  ─▶ scratch          # Step 6  — NPT density equilibration (iterative)  [SYMLINK]
+├── equil/    ─▶ scratch          # Steps 8–9 — Per-replica equilibration (all at T_MIN, scaled H)
 │   ├── rep000/ … repNNN/
-├── prod/     ─▶ scratch          # Steps 9–11 — REST2 production                  [SYMLINK]
+├── prod/     ─▶ scratch          # Steps 10–12 — REST2 production                 [SYMLINK]
 │   ├── rep000/                   #           lambda=1 → the physical T_MIN ensemble
 │   │   ├── rest2.tpr  rest2.log  rest2.gro  rest2.cpt  rest2.xtc
 │   │   └── plumed.dat            #           minimal (hrex needs -plumed; no CVs)
@@ -49,8 +50,8 @@ OUTDIR/
 ```
 
 **Output model (folder-symlink).** Small dirs (`build/ em/ topol/ analysis/ logs/`,
-`parameters.txt`, final PDB) are **real** in `OUTDIR`; the bulk stage dirs (`density/
-equil/ prod/`) are **folder symlinks into scratch** (`SCRATCH_DIR`), so mdrun writes
+`parameters.txt`, final PDB) are **real** in `OUTDIR`; the bulk stage dirs (`heat/
+density/ equil/ prod/`) are **folder symlinks into scratch** (`SCRATCH_DIR`), so mdrun writes
 straight onto scratch and analysis reads `prod/rep000/rest2.xtc` through the symlink.
 On success the run copies the real dirs (incl. `topol/`) into `SCRATCH_DIR` so the
 scratch archive stands alone. Set **`SYMLINK_BULK=0`** to keep the stage dirs **real in
@@ -73,7 +74,7 @@ scratch archive stands alone. Set **`SYMLINK_BULK=0`** to keep the stage dirs **
 ## Notes / gotchas
 
 - **The engine fail-loud checks that hrex actually exchanges** (a ~20-attempt pre-flight,
-  Step 10) *before* the real production, so a wrong/broken build cannot silently produce a
+  Step 11) *before* the real production, so a wrong/broken build cannot silently produce a
   fake REST2 run. If it aborts there, check `REST2_GMXRC` points at the 2023.5 build.
 - **Acceptance too high (e.g. >60%)** → the ladder is over-dense; widen `T_MAX` or reduce
   `REPLICAS`. **Too low (<15%)** → add replicas or lower `T_MAX`. Tunable per system, like
