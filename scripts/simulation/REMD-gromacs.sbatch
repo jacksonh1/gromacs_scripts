@@ -78,6 +78,17 @@ SYMLINK_BULK="${SYMLINK_BULK:-1}"
 
 # Force field & water model
 FF="${FF:-amber99sb-ildn}"          # GROMACS ff name
+# Resolve a force-field alias (site_config.sh FF_ALIASES) to the real directory
+# name, e.g. charmm36m -> charmm36-feb2026_cgenff-5.0. A non-alias passes through.
+# FF_REQUESTED keeps what the job asked for so parameters.txt can show both.
+FF_REQUESTED="$FF"
+FF="$(resolve_ff "$FF")"
+if [[ $FF != "$FF_REQUESTED" ]]; then
+  FF_ALIAS_NOTE="   (alias: ${FF_REQUESTED})"
+  echo "[INFO] FF alias '${FF_REQUESTED}' resolved to force field '${FF}'"
+else
+  FF_ALIAS_NOTE=""
+fi
 WATER="${WATER:-tip3p}"
 BOX_SHAPE="${BOX_SHAPE:-dodecahedron}"   # dodecahedron ≈ truncated octahedron
 BOX_BUFFER="${BOX_BUFFER:-1.0}"          # nm (GROMACS uses nm; 10 Å = 1.0 nm)
@@ -130,7 +141,7 @@ SEED="${SEED:--1}"
 rep_seed() { if [[ "$SEED" == "-1" ]]; then echo -1; else echo $(( SEED + $1 )); fi; }
 
 # REMD exchange & production
-REPLEX_PS="${REPLEX_PS:-0.5}"            # attempt exchange every this many ps
+REPLEX_PS="${REPLEX_PS:-1.0}"            # exchange attempt interval (ps); keep >= 1 (GPU deadlock gotcha)
 TOTAL_NS="${TOTAL_NS:-20}"               # total production per replica (ns)
 
 # Equilibration
@@ -732,6 +743,21 @@ ELAPSED_S=$(( $(date +%s) - CURRENT_TIME ))
 
 # Write to OUTDIR always; also to scratch when offloading, so each scratch archive
 # is self-describing. (SYMLINK_BULK=0 → SCRATCH_DIR empty → OUTDIR-only.)
+# ── Provenance capture ───────────────────────────────────────────────────────
+# What code and what toolchain actually ran. Resolved HERE so a finished job is
+# self-describing on its own — reconstructing a run must not depend on still having
+# the submit script, or on the repo being unchanged since.
+# Probed once (the heredoc below runs per destination) and fail-soft: a version
+# probe must never take the job down, so "did it run?" is kept separate from "what
+# did it say?" (GOTCHAS: `VAR=$(cmd | grep ...)` under `set -e`).
+# The engine path is spelled out rather than taken from BASH_SOURCE — sbatch runs
+# from a temp copy, so BASH_SOURCE does not point at the repo (GOTCHAS).
+set +e
+GMX_VERSION="$($GMX --version 2>/dev/null | sed -n 's/^GROMACS version:[[:space:]]*//p' | head -1)"
+SITE_CONFIG_PATH="$(cd "${GROMACS_SCRIPTS_DIR}/../.." && pwd)/site_config.sh"
+set -e
+GMX_VERSION="${GMX_VERSION:-unknown}"
+
 PARAM_DESTS=( "${OUTDIR}/parameters.txt" )
 [[ -n "$SCRATCH_DIR" ]] && PARAM_DESTS+=( "${SCRATCH_DIR}/parameters.txt" )
 for dest in "${PARAM_DESTS[@]}"; do
@@ -742,7 +768,7 @@ Job ID: ${SLURM_JOB_ID:-N/A}
 Replicas: $REPLICAS
 Total ns per replica: $TOTAL_NS
 Temperature range: ${T_MIN}–${T_MAX} K
-Force field: $FF
+Force field: $FF${FF_ALIAS_NOTE}
 Water model: $WATER
 Box shape: $BOX_SHAPE
 Box buffer (nm): $BOX_BUFFER
@@ -762,6 +788,15 @@ Output directory: $OUTDIR
 Scratch directory: ${SCRATCH_DIR:-(none — SYMLINK_BULK=0, bulk real in OUTDIR)}
 GPUs: ${SLURM_GPUS_ON_NODE:-unknown}
 Density convergence segments: $seg
+
+# ── Provenance ──
+Engine: ${GROMACS_SCRIPTS_DIR}/REMD-gromacs.sbatch
+Site config: $SITE_CONFIG_PATH
+GROMACS: $GMX_VERSION
+GMXRC: $GMXRC
+GMXLIB: ${GMXLIB:-(unset)}
+Input structure: $PDB_IN
+Submitted from: ${SLURM_SUBMIT_DIR:-N/A}
 EOF
 done
 

@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# plumed.sh — activate PLUMED 2.9.4 (kernel + CLI)
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy to $HOME/plumed.sh (or anywhere, and point PLUMED_SH in site_config.sh at
+# it), then edit the two paths below. Sourced by:
+#   - scripts/installation/install_gromacs-plumed.sh        (at build/patch time)
+#   - scripts/installation/install_gromacs-2023.5-plumed.sh (at build time)
+#   - scripts/simulation/REST2-gromacs.sbatch               (at run time)
+#
+# PLUMED_KERNEL is what mdrun dlopen()s; PATH is what `plumed patch` and
+# `plumed partial_tempering` come from. Both are needed.
+#
+# Note: the `plumed` CLI links libhcoll.so.1 / libocoms.so.0 and will fail to
+# start on nodes lacking /opt/mellanox — see HCOLL_COMPAT_DIR in site_config.sh.
+# The kernel itself loads fine on those nodes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Install prefix used by install_plumed.sh (--prefix).
+PLUMED_PREFIX="$HOME/opt/plumed/2.9.4"
+
+# Unpacked PLUMED source tree. Only needed for the Python bindings and the vim
+# syntax files; drop the last three exports if you don't want them.
+PLUMED_SRC="/orcd/pool/004/$USER/installations/plumed-2.9.4"
+
+export PATH="${PLUMED_PREFIX}/bin:$PATH"
+export LD_LIBRARY_PATH="${PLUMED_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export PLUMED_KERNEL="${PLUMED_PREFIX}/lib/libplumedKernel.so"
+
+export LIBRARY_PATH="${PLUMED_SRC}/src/lib/:${LIBRARY_PATH:-}"
+export PLUMED_VIMPATH="${PLUMED_SRC}/vim"
+export PYTHONPATH="${PLUMED_SRC}/python:${PYTHONPATH:-}"

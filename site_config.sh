@@ -21,12 +21,48 @@ REST2_GMXRC="${REST2_GMXRC:-$HOME/opt/gromacs/2023.5-plumed/bin/GMXRC}"
 # ── Custom force fields (GMXLIB) ──────────────────────────────────────────────
 # Extra directory GROMACS searches for <name>.ff force-field dirs, IN ADDITION to
 # each build's bundled share/gromacs/top (so amber99sb-ildn etc. keep working).
-# This is how FF=charmm36m is found — the CHARMM36m GROMACS port lives here as
-# charmm36m.ff (installed from the MacKerell force-switch port; -water tip3p then
-# resolves to the CHARMM-modified TIP3P inside that dir). Covers both builds above.
+# This is how a CHARMM force field is found — the CHARMM36m GROMACS port lives here
+# as charmm36-feb2026_cgenff-5.0.ff, keeping its upstream dated name so the FF job
+# parameter records which release was used (-water tip3p then resolves to the
+# CHARMM-modified TIP3P inside that dir). Covers both builds above.
 # GMXRC does not set GMXLIB, so exporting it here survives sourcing GMXRC.
 export GMXLIB="$HOME/opt/gromacs/ff${GMXLIB:+:$GMXLIB}"
-# CUDA matching that build (2023.5 predates cuda 12.9; use 12.4 via deprecated-modules).
+# ── Force-field aliases ───────────────────────────────────────────────────────
+# Short, memorable names for the force-field ports installed under GMXLIB above.
+# A job may set FF to either an alias or the real directory name; the engines
+# resolve the alias at STEP 1 and record the RESOLVED name in parameters.txt, so a
+# finished run is always identified by the upstream dated release it actually used.
+# Add one entry per installed port; the value is the directory name minus ".ff".
+declare -A FF_ALIASES=(
+  [charmm36m]="charmm36-feb2026_cgenff-5.0"
+)
+
+# resolve_ff <name> — echo the real force-field directory name for <name>.
+# A name that is not an alias passes through untouched: force fields bundled with
+# GROMACS (amber99sb-ildn, …) live in the build's own share/gromacs/top, not in
+# GMXLIB, so there is nothing to check here and pdb2gmx fails loudly on a bad name.
+# An alias pointing at a force field that is NOT installed is a site-config error,
+# so it fails at STEP 1 rather than 200 lines later inside pdb2gmx.
+resolve_ff() {
+  local name="$1" target dir found=0
+  target="${FF_ALIASES[$name]:-}"
+  if [[ -z $target ]]; then
+    printf '%s\n' "$name"
+    return 0
+  fi
+  local IFS=':'
+  for dir in $GMXLIB; do
+    if [[ -d "${dir}/${target}.ff" ]]; then found=1; break; fi
+  done
+  if (( ! found )); then
+    echo "[ERROR] FF alias '${name}' resolves to '${target}.ff', which is not in GMXLIB=${GMXLIB}" >&2
+    echo "[ERROR] Install it (scripts/installation/README.md Step 7) or fix FF_ALIASES in site_config.sh." >&2
+    return 1
+  fi
+  printf '%s\n' "$target"
+}
+
+# CUDA matching the REST2 build above (2023.5 predates cuda 12.9; use 12.4 via deprecated-modules).
 REST2_CUDA_MODULE="${REST2_CUDA_MODULE:-cuda/12.4.0}"
 
 # Script that activates the PLUMED kernel (sets PLUMED_KERNEL, LD_LIBRARY_PATH). REST2 only.

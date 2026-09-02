@@ -217,6 +217,11 @@ frame, so this is not a trajectory and there is no matching topology file. See
 Plain-text record of all simulation parameters (force field, temperature,
 timestep, production length, NPT convergence segments, etc.) and the scratch path.
 
+It ends with a **Provenance** block recording what actually ran, so a finished job
+is self-describing without the submit script: the engine path, the resolved
+`site_config.sh`, the GROMACS version, `GMXRC`, `GMXLIB` (which is how
+a `FF=charmm*` name resolves), the input structure, and `$SLURM_SUBMIT_DIR`.
+
 ---
 
 ## Key Files for Analysis

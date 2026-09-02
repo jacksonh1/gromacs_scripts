@@ -14,11 +14,15 @@ OUTBASE="IL7-2-V3-cys"
 
 # ── Force field / box ───────────────────────────────────────────────────────
 # FF="amber14sb"                      # pdb2gmx force field name (default: amber99sb-ildn)
-#                                     #   FF="charmm36m" → CHARMM36m (needs GMXLIB set in
-#                                     #   site_config.sh); auto-switches the mdp to force-switch
-#                                     #   vdW at 1.2 nm + DispCorr=no and forces CUTOFF_NM=1.2.
+#                                     #   FF="charmm36m" → CHARMM36m, via the alias defined
+#                                     #   in site_config.sh (FF_ALIASES). The engine resolves
+#                                     #   it to the installed dated port name and logs THAT in
+#                                     #   parameters.txt, so the release is always on record.
+#                                     #   The real directory name works too. Any FF starting
+#                                     #   "charmm" auto-switches the mdp to force-switch vdW
+#                                     #   at 1.2 nm + DispCorr=no and forces CUTOFF_NM=1.2.
 # WATER="tip3p"                       # resolved inside the FF dir: amber→standard TIP3P,
-#                                     #   charmm36m→CHARMM-modified TIP3P (automatic, matched)
+#                                     #   charmm→CHARMM-modified TIP3P (automatic, matched)
 # BOX_SHAPE="dodecahedron"            # dodecahedron ≈ truncated octahedron
 # BOX_BUFFER="1.0"                    # nm  (10 Å)
 # NEUTRALIZE=1
@@ -40,7 +44,9 @@ T_MAX=400
 
 # ── Production ───────────────────────────────────────────────────────────────
 TOTAL_NS=20                           # ns per replica
-REPLEX_PS="0.5"                       # exchange attempt interval (ps)
+REPLEX_PS="1.0"                       # exchange attempt interval (ps). Keep >= 1.0:
+                                      #   sub-ps exchange deadlocks GPU-resident REMD
+                                      #   (MPI collective hang, clean physics). See GOTCHAS.md.
 # ENSEMBLE=NVT                        # NVT (constant volume) | NPT (C-rescale barostat)
 # REF_P="1.0"                         # bar (NPT only)
 # TAU_P="1.0"                         # ps  (NPT only)

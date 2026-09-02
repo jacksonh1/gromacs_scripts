@@ -131,6 +131,34 @@ for d in "${REPDIRS[@]}"; do
 done
 echo "[OK] REMD production complete for all $REPLICAS replicas"
 
+# ── Provenance: APPEND a restart record to the original parameters.txt ───────
+# A restart can run under a different GROMACS build or a changed repo than the run
+# that created this directory, so the record is appended rather than overwriting —
+# parameters.txt ends up carrying the original run plus one entry per resume.
+# finalize_outputs.sh copies parameters.txt into the scratch archive, so appending
+# to OUTDIR is enough. Fail-soft probe (GOTCHAS: `VAR=$(cmd | grep ...)` + `set -e`).
+set +e
+GMX_VERSION="$($GMX --version 2>/dev/null | sed -n 's/^GROMACS version:[[:space:]]*//p' | head -1)"
+SITE_CONFIG_PATH="$(cd "${GROMACS_SCRIPTS_DIR}/../.." && pwd)/site_config.sh"
+set -e
+GMX_VERSION="${GMX_VERSION:-unknown}"
+
+cat >> "${OUTDIR}/parameters.txt" <<EOF
+
+# ── Restart (job ${SLURM_JOB_ID:-manual}, $(date '+%Y-%m-%d %H:%M:%S')) ──
+Engine: ${GROMACS_SCRIPTS_DIR}/REMD-restart.sbatch
+Site config: $SITE_CONFIG_PATH
+GROMACS: $GMX_VERSION
+GMXRC: $GMXRC
+GMXLIB: ${GMXLIB:-(unset)}
+Replicas resumed: $REPLICAS
+Exchange interval (steps): $REPLEX_STEPS
+RNG seed (-reseed): $RESEED
+Restart mdrun log: $RESTART_LOG
+Submitted from: ${SLURM_SUBMIT_DIR:-N/A}
+EOF
+echo "[OK] Restart provenance appended to ${OUTDIR}/parameters.txt"
+
 # ── Finalize: export final PDB (mirrors STEP 10) ─────────────────────────────
 # No trajectory re-linking: under the folder-symlink model remd.xtc is already at
 # prod/rep*/remd.xtc (real on scratch via the prod/ symlink, or real in OUTDIR).

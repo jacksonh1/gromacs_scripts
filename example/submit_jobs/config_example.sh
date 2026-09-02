@@ -26,11 +26,15 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 # ── Force field / box ───────────────────────────────────────────────────────
 # FF="amber14sb"                      # pdb2gmx force field name (default: amber99sb-ildn)
-#                                     #   FF="charmm36m" → CHARMM36m (needs GMXLIB set in
-#                                     #   site_config.sh); auto-switches the mdp to force-switch
-#                                     #   vdW at 1.2 nm + DispCorr=no and forces CUTOFF_NM=1.2.
+#                                     #   FF="charmm36m" → CHARMM36m, via the alias defined
+#                                     #   in site_config.sh (FF_ALIASES). The engine resolves
+#                                     #   it to the installed dated port name and logs THAT in
+#                                     #   parameters.txt, so the release is always on record.
+#                                     #   The real directory name works too. Any FF starting
+#                                     #   "charmm" auto-switches the mdp to force-switch vdW
+#                                     #   at 1.2 nm + DispCorr=no and forces CUTOFF_NM=1.2.
 # WATER="tip3p"                       # resolved inside the FF dir: amber→standard TIP3P,
-#                                     #   charmm36m→CHARMM-modified TIP3P (automatic, matched)
+#                                     #   charmm→CHARMM-modified TIP3P (automatic, matched)
 # BOX_SHAPE="dodecahedron"            # dodecahedron ≈ truncated octahedron
 # BOX_BUFFER="1.0"                    # nm  (10 Å)
 # NEUTRALIZE=1

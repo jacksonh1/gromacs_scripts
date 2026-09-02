@@ -187,6 +187,15 @@ There is **no `trajectories/` collection dir**. Under the folder-symlink model e
 
 A plain-text record of all simulation parameters (force field, temperatures, timestep, exchange interval, etc.) and the scratch directory path. Written at the end of the job.
 
+It ends with a **Provenance** block recording what actually ran, so a finished job
+is self-describing without the submit script: the engine path, the resolved
+`site_config.sh`, the GROMACS version, `GMXRC`, `GMXLIB` (which is how
+a `FF=charmm*` name resolves), the input structure, and `$SLURM_SUBMIT_DIR`.
+
+A restart (`REMD-restart.sbatch`) **appends** its own provenance record rather than
+overwriting, so the file carries the original run plus one entry per resume — a
+resume can run under a different GROMACS build than the run that created the directory.
+
 ---
 
 ## Key Files for Analysis

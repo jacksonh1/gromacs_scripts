@@ -35,21 +35,30 @@ Plain MD is mainly for **#4** (and optionally #1, #2); T-REMD is primarily for *
 
 ## Prerequisites
 
-- GROMACS 2024.3 compiled with MPI + CUDA (see `scripts/installation/`)
+- GROMACS 2024.3 compiled with MPI + CUDA, plus PLUMED — **full build instructions in [`scripts/installation/README.md`](scripts/installation/README.md)**
 - A conda env for post-analysis (matplotlib, mdanalysis, numpy, …), created from `scripts/installation/environment.yml`, with the `gromd_analysis` package installed into it — see One-Time Setup. The sbatch engines use the system `python3` (standard library only) for inline temperature-ladder and convergence calculations, and activate the conda env only for the post-analysis/plotting steps.
 - SLURM with GPU access
 
-T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GROMACS 2023.5 + PLUMED build** — the PLUMED hrex patch is broken on GROMACS 2024 (runs but silently gives zero exchanges), so REST2 uses its own build (`REST2_GMXRC` in `site_config.sh`; recipe in `scripts/installation/install_gromacs-2023.5-plumed.sh`). See `CLAUDE.md`.
+T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GROMACS 2023.5 + PLUMED build** — the PLUMED hrex patch is broken on GROMACS 2024 (runs but silently gives zero exchanges), so REST2 uses its own build (`REST2_GMXRC` in `site_config.sh`; see `scripts/installation/README.md` Step 5). Skip that build entirely if you don't run REST2. See `CLAUDE.md`.
 
 ---
 
 ## One-Time Setup
+
+0. **Build GROMACS + PLUMED** (skip if your cluster already has a suitable build):
+   see **[`scripts/installation/README.md`](scripts/installation/README.md)** — the ordered
+   recipe for PLUMED, the 2024.3 build (T-REMD/MD), the 2023.5 build (REST2 only),
+   the optional CHARMM36m force field, and how to port the build scripts to another
+   cluster.
 
 1. **Edit `site_config.sh`** in the repo root. Set:
    - `GMXRC` — path to your `bin/GMXRC` from the GROMACS installation
    - `SCRATCH_ROOT` — fast scratch storage root for trajectory files (~100 GB per job)
    - `CUDA_MODULE`, `OPENMPI_MODULE` — your cluster's module names
    - `CONDA_MODULE`, `GROMD_ENV` — module providing conda and the analysis env name
+
+   (`REST2_GMXRC`, `GMXLIB`, `PLUMED_SH`, `HCOLL_COMPAT_DIR` matter only for REST2 /
+   CHARMM36m — see the installation README.)
 
 2. **Create the analysis conda env** (once per cluster, on a login node):
    ```bash
@@ -81,11 +90,14 @@ T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GR
    ```bash
    # T-REMD:
    cp example/submit_jobs/submit_REMD.sh my_job.sh
-   # edit my_job.sh: set PDB_IN, REPLICAS, T_MAX, TOTAL_NS, ENSEMBLE, etc.
+   # edit my_job.sh: set PDB_IN, REPLICAS, T_MAX, TOTAL_NS, ENSEMBLE, FF, etc.
 
    # Plain MD:
    cp example/submit_jobs/submit_MD.sh my_job.sh
-   # edit my_job.sh: set PDB_IN, T_SIM, TOTAL_NS, TRAJ_PS, RELAX_NS, etc.
+   # edit my_job.sh: set PDB_IN, T_SIM, TOTAL_NS, TRAJ_PS, RELAX_NS, FF, etc.
+
+   # REST2:
+   cp example/submit_jobs/submit_REST2.sh my_job.sh
    ```
 
 2. Run it:
@@ -93,11 +105,40 @@ T-REMD and plain MD run on the GROMACS 2024.3 build. **REST2 needs a separate GR
    bash my_job.sh
    ```
 
-All job parameters live in the submit script — no separate config file needed.
+### Parameters
+
+**→ [`docs/PARAMETERS.md`](docs/PARAMETERS.md) is the full reference** — every job
+parameter for all three engines, with defaults, ranges, and which engine accepts it.
+
+There are **two ways** to set job parameters, and they can be mixed:
+
+- **In the submit script** (the common case) — edit the assignments at the top of your
+  copy; the script passes them to `sbatch --export`.
+- **In a separate config file** — all three engines take a config file as their **first
+  argument** and source it. Start from `scripts/simulation/config_example.sh` and submit
+  with `example/submit_jobs/submit_REMD_with_config.sh my_config.sh`, or call an engine
+  directly: `sbatch -n 48 scripts/simulation/REMD-gromacs.sbatch my_config.sh`.
+  A value in the config file **overrides** the same name passed via `--export`.
+
+Anything set in neither place falls back to the engine default listed in
+`docs/PARAMETERS.md`.
+
+Cluster-level settings (GROMACS paths, modules, scratch root, force-field aliases) are
+**not** job parameters — they live in `site_config.sh` and are edited once. SLURM
+resources come from the `#SBATCH` headers in the engine script.
 
 Parameters are validated at job start: a missing `PDB_IN`, an out-of-range or
 non-numeric value, or (in a config file) a misspelled key fails the job immediately with
-a clear `[ERROR]` message instead of silently falling back to a default.
+a clear `[ERROR]` message instead of silently falling back to a default. Typo detection
+is **config-file only** — under `--export=ALL` a job inherits the whole environment, so
+there is no manifest to check a misspelled name against.
+
+Two parameter gotchas worth knowing before your first run:
+
+- **`REPLEX_PS`** — never set below `1.0`. Sub-ps exchange deadlocks GPU-resident REMD
+  mid-run with clean physics. The default is `1.0`; there is no reason to lower it.
+- **`FF` under REST2** — CHARMM force fields are **rejected** by the REST2 engine; see
+  [Force-field compatibility](#force-field-compatibility) below.
 
 ---
 
@@ -167,6 +208,43 @@ always NPT.
 
 ---
 
+### Force-field compatibility
+
+`FF` selects the `pdb2gmx` force field (default `amber99sb-ildn`). It accepts a short
+alias from `FF_ALIASES` in `site_config.sh` — e.g. `FF="charmm36m"` — which the engine
+expands to the installed dated port name and records **resolved** in `parameters.txt`,
+so a finished run always names the exact release it used. Any `charmm*` name switches
+the generated mdp to force-switched vdW at 1.2 nm, as CHARMM requires.
+
+**T-REMD and plain MD accept any force field `pdb2gmx` can build.** They scale nothing,
+so the topology is used exactly as written.
+
+**REST2 does not.** It works by having `plumed partial_tempering` rewrite the topology
+to scale the solute's terms by λ, and that tool only knows `[ atoms ]`, `[ atomtypes ]`,
+`[ nonbond_params ]`, `[ pairtypes ]` and `[ dihedrals ]`. A force field with a solute
+term outside that list is silently only *partially* scaled. CHARMM's **CMAP** backbone
+cross-term is exactly such a term — measured byte-identical between λ=1.0 and λ=0.5 —
+and it applies only to protein, i.e. precisely the hot region. A CHARMM REST2 run would
+therefore scale charges, LJ and dihedrals while leaving the backbone conformational term
+at full strength, and **neither self-check would notice**: λ=1.0 stays exact so the
+`scale=1.0 → P=1.0` sanity pair passes, and exchanges still occur at normal rates so the
+acceptance gate passes.
+
+So the REST2 engine **rejects `FF=charmm*` at STEP 1** rather than produce a
+plausible-looking wrong ensemble. This is a limitation of the scaling tool, not of the
+GROMACS build (the 2023.5 REST2 build reads `GMXLIB` and builds CHARMM topologies fine)
+and not of REST2 as a method. Note AMBER **ff19SB** also uses CMAP and would hit the
+same problem; it is not guarded by name, so don't use it with REST2.
+
+For CHARMM enhanced sampling, use T-REMD.
+
+**Trying a force field this pipeline has not used before?**
+[`docs/FORCE_FIELDS.md`](docs/FORCE_FIELDS.md) explains the rule and gives a short,
+GPU-free procedure to check whether `partial_tempering` actually scales everything that
+force field needs scaled — run it once before any production REST2 run.
+
+---
+
 ## Output & Analysis
 
 **Output model (folder-symlink).** Small, laptop-worthy dirs (`build/ em/ analysis/
@@ -216,9 +294,13 @@ parameters — see `scripts/analysis/README.md`.
 
 | File | Who edits it | What it controls |
 |------|-------------|-----------------|
-| `site_config.sh` | Once per user/cluster | GROMACS path, scratch root, module names |
-| `my_job.sh` (copy of `submit_REMD.sh` or `submit_MD.sh`) | Per job | PDB input, temperature(s), simulation length, ensemble (REMD: replicas + range) |
+| `site_config.sh` | Once per user/cluster | GROMACS paths, scratch root, module names, `GMXLIB`, force-field aliases |
+| `my_job.sh` (copy of a `submit_*.sh`) | Per job | PDB input, force field, temperature(s), simulation length, ensemble (REMD/REST2: replicas + range) |
+| `my_config.sh` (copy of `config_example.sh`) | Per job, optional | The same job parameters, in a standalone file passed as the engine's first argument |
 | `#SBATCH` headers in engine script | Only if changing resource defaults | Partition, GPU type, memory, wall time |
+
+**Full parameter reference: [`docs/PARAMETERS.md`](docs/PARAMETERS.md)** — every job
+parameter, its default, its range, and which engines accept it.
 
 ---
 
@@ -228,6 +310,9 @@ parameters — see `scripts/analysis/README.md`.
 gromacs_REMD/
 ├── site_config.sh              # Cluster-level settings (edit once)
 ├── pyproject.toml              # Python package: gromd_analysis + the gromd-* commands
+├── docs/
+│   ├── PARAMETERS.md           # Full job-parameter reference (all three engines)
+│   └── FORCE_FIELDS.md         # FF selection, aliases, and the REST2 compatibility check
 ├── gromd_analysis/             # The Python half of the analysis layer (installable)
 │   ├── layout.py                  # JobDir — parses OUTDIR into typed paths (gromd-layout)
 │   ├── xvg.py                     # .xvg parser + line plot     (gromd-plot-xvg)
@@ -246,7 +331,13 @@ gromacs_REMD/
 │   │   ├── run_analysis.sh        # Whole post-analysis, re-runnable on a finished job
 │   │   ├── analysis.sbatch        # Same, as a CPU-only SLURM job
 │   │   └── calc_traj_*.sh, fix_PBC*.sh, multichain_*.sh   # the gmx CLI steps
-│   └── installation/           # GROMACS + PLUMED build scripts
+│   └── installation/           # Build recipes — start at installation/README.md
+│       ├── README.md              # Ordered GROMACS/PLUMED/FF/conda install guide
+│       ├── install_plumed.sh      # PLUMED 2.9.4
+│       ├── install_gromacs-plumed.sh          # GROMACS 2024.3+PLUMED (T-REMD/MD)
+│       ├── install_gromacs-2023.5-plumed.sh   # GROMACS 2023.5+PLUMED (REST2)
+│       ├── install_python_env.sh  # groMD_env + gromd_analysis
+│       └── plumed.sh.template     # template for $HOME/plumed.sh
 └── example/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/

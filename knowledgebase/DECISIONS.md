@@ -72,6 +72,25 @@ alternative that was rejected and why. Operational pitfalls live in `CLAUDE.md`
 
 ## Robustness
 
+- **A finished job records its own toolchain, not just its parameters.**
+  `parameters.txt` ends with a Provenance block: engine path, resolved
+  `site_config.sh`, GROMACS version, `GMXRC`/`REST2_GMXRC`, `PLUMED`, `GMXLIB`,
+  input structure, `$SLURM_SUBMIT_DIR`. *Why:* it previously recorded every job
+  parameter and nothing about **which code and which GROMACS produced them** —
+  reconstructing a run depended on still having the submit script and on the repo
+  being unchanged since, neither of which is durable. `GMXLIB` matters especially:
+  it is how a `FF=charmm*` name resolves, so the force field is not fully determined
+  by the `FF` string alone. For the same reason CHARMM ports keep their **upstream
+  dated directory name** (`charmm36-feb2026_cgenff-5.0`) rather than a generic
+  `charmm36m` — the release is then in the `FF` value itself, and re-dropping a newer
+  port into one directory can't silently change what an old `parameters.txt` means.
+  A short alias (`FF_ALIASES` in `site_config.sh`, resolved by `resolve_ff` at STEP 1)
+  buys back the ergonomics without the cost, because it is expanded **before**
+  `parameters.txt` is written — the record always names the dated port, never the alias. Version probes are captured once before the heredoc (which
+  runs per destination) inside `set +e`, so a probe that fails cannot kill the job.
+  `REMD-restart.sbatch` **appends** its record instead of overwriting — a resume can
+  run under a different build than the run that created the directory.
+
 - **The exchange-statistics block parses into `ExchangeStats`, not a dict.** It was a
   7-key dict that `main()` then mutated with two more keys from a second parser before
   handing it to `report()` 130 lines away. *Why:* the shape is fixed and matters, so it

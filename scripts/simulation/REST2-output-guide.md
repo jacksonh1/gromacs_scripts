@@ -66,7 +66,7 @@ scratch archive stands alone. Set **`SYMLINK_BULK=0`** to keep the stage dirs **
 | `prod/rep000/rest2.log` | Exchange log; the `Replica exchange statistics` block has per-pair acceptance |
 | `topol/topol_rep*.top` | The scaled Hamiltonians (reproducible from `marked.top` + lambda) |
 | `analysis/remd_acceptance.csv` | Per-pair exchange acceptance (target ~20–40%; retune the ladder if far off) |
-| `parameters.txt` | Includes the lambda ladder and effective-T range actually used |
+| `parameters.txt` | Includes the lambda ladder and effective-T range actually used, plus a **Provenance** block: engine path, resolved `site_config.sh`, GROMACS and PLUMED versions, `REST2_GMXRC`, `GMXLIB`, input structure, submit dir |
 
 ---
 

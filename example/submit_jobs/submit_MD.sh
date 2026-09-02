@@ -24,6 +24,14 @@ SEED=-1
 #                 state equilibrium sampling). Uncomment to enable:
 # RELAX_NS=0.5
 
+# === Force field ===
+# Default is AMBER99SB-ILDN. For CHARMM36m use the alias "charmm36m" — the engine
+# resolves it to the installed dated port (charmm36-feb2026_cgenff-5.0) and records
+# that resolved name in parameters.txt. Aliases are defined in site_config.sh.
+# CHARMM auto-switches the mdp to force-switch vdW at 1.2 nm and forces CUTOFF_NM=1.2.
+FF="amber99sb-ildn"     # or: FF="charmm36m"
+WATER="tip3p"           # resolved inside the FF dir; always matches the force field
+
 # === System ===
 PDB_IN="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/input_pdbs/helix_fusion.pdb"
 
@@ -32,5 +40,5 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 
 
 sbatch \
-  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_SIM="$T_SIM",TOTAL_NS="$TOTAL_NS",TRAJ_PS="$TRAJ_PS",RELAX_NS="${RELAX_NS:-0}",SEED="$SEED" \
+  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_SIM="$T_SIM",TOTAL_NS="$TOTAL_NS",TRAJ_PS="$TRAJ_PS",RELAX_NS="${RELAX_NS:-0}",SEED="$SEED",FF="$FF",WATER="$WATER" \
   "${GROMACS_SCRIPTS_DIR}/MD-gromacs.sbatch"

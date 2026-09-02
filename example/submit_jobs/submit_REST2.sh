@@ -27,6 +27,14 @@ ENSEMBLE=NPT       # NVT | NPT
 # NOTE: on GPU this fixes initial conditions and RNG streams, not a bit-for-bit trajectory.
 SEED=-1
 
+# === Force field ===
+# Default is AMBER99SB-ILDN. For CHARMM36m use the alias "charmm36m" — the engine
+# resolves it to the installed dated port (charmm36-feb2026_cgenff-5.0) and records
+# that resolved name in parameters.txt. Aliases are defined in site_config.sh.
+# CHARMM auto-switches the mdp to force-switch vdW at 1.2 nm and forces CUTOFF_NM=1.2.
+FF="amber99sb-ildn"     # or: FF="charmm36m"
+WATER="tip3p"           # resolved inside the FF dir; always matches the force field
+
 # === System ===
 PDB_IN="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/input_pdbs/helix_fusion.pdb"
 
@@ -36,5 +44,5 @@ OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/exampl
 # The engine's #SBATCH header targets pi_keating; add -p / --gres here to override,
 # e.g. to build-portable mit_normal_gpu nodes:  -p mit_normal_gpu --gres=gpu:l40s:4
 sbatch -n "$REPLICAS"\
-  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE",SEED="$SEED" \
+  --export=ALL,PDB_IN="$PDB_IN",OUTBASE="$OUTBASE",OUTDIR="$OUTDIR",T_MIN="$T_MIN",T_MAX="$T_MAX",TOTAL_NS="$TOTAL_NS",REPLEX_PS="$REPLEX_PS",ENSEMBLE="$ENSEMBLE",SEED="$SEED",FF="$FF",WATER="$WATER" \
   "${GROMACS_SCRIPTS_DIR}/REST2-gromacs.sbatch"

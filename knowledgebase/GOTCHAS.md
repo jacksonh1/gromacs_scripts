@@ -113,7 +113,7 @@ Things to keep straight when touching parameters:
 
 On GPU-resident REMD production (`-nb/-pme/-bonded gpu`, GPU update, many ranks/GPU — e.g. 48 ranks on 4 L40S), `REPLEX_PS=0.5` (exchange every 250 steps @ 2 fs) reliably **hangs mid-run**: CPUs at 100%, GPUs at 0%, indefinitely. Signature: *all* replicas frozen at the *same* exchange step with **clean physics** (`Constr. rmsd = 0`, no LINCS/NaN) — an **MPI collective deadlock at exchange**, not a blow-up (contrast the CUDA #700 gotcha). Cause: each accepted swap moves GPU-resident coordinates via GPU↔CPU transfers + stream syncs; at 250-step spacing consecutive swaps' stream work overlaps and races. It's a **threshold, not linear**: the *same* config at `REPLEX_PS=1.0` never hangs — interval was the only change.
 
-**Fix:** keep **`REPLEX_PS ≥ 1.0`** (1–2 ps is standard and sub-ps buys no extra sampling). Only if sub-ps exchange were truly required, add **`-update cpu`** to the STEP 9 `mdrun` (moves the swap off the GPU) at ~10–25% throughput cost. `config_example.sh` ships `0.5` — raise it.
+**Fix:** keep **`REPLEX_PS ≥ 1.0`** (1–2 ps is standard and sub-ps buys no extra sampling). Only if sub-ps exchange were truly required, add **`-update cpu`** to the STEP 9 `mdrun` (moves the swap off the GPU) at ~10–25% throughput cost. **Both engine defaults are `1.0`** (REMD's was raised from `0.5` on 2026-09-02, along with `scripts/simulation/config_example.sh`), so a job now has to lower it deliberately.
 
 ### SLURM/GROMACS: `gmx_mpi` needs `libhcoll`/`libocoms` — missing on some `mit_normal_gpu` nodes; also constrain to `rocky8`
 
@@ -173,7 +173,9 @@ The engines write the **bulk stage dirs** (`density/ equil/ prod/`, plus MD `hea
 
 The engines' mdp nonbonded block is AMBER-style: `rvdw = rcoulomb = CUTOFF_NM` (1.0 nm) plain Verlet cutoff + `DispCorr = EnerPres`. CHARMM36/36m was **parameterized with force-switched van der Waals** (`vdw-modifier = force-switch`, `rvdw-switch = 1.0`, `rvdw = rcoulomb = 1.2 nm`) and **no analytic dispersion correction** (`DispCorr = no` — the force-switch already handles the vdW tail; adding DispCorr double-counts). Running CHARMM with the AMBER cutoff settings *runs fine and looks plausible* but produces subtly wrong forces/energies — the classic silent-bad-result failure. Equally, pairing CHARMM protein with plain TIP3P (or AMBER protein with the CHARMM-modified TIP3P) is wrong: each force field is validated only with its matched water. In the GROMACS CHARMM port, `pdb2gmx -water tip3p` resolves to the **CHARMM-modified TIP3P automatically** (it reads `<ff>.ff/tip3p.itp`, i.e. the LJ-on-H variant), so water follows the force field for free — never force plain TIP3P onto CHARMM.
 
-**Fix (applied):** all three engines gate the nonbonded mdp lines on `[[ $FF == charmm* ]]` — CHARMM emits the force-switch block + `DispCorr=no` and forces `CUTOFF_NM=1.2` (with an `[INFO]` override notice); the AMBER branch (`VDW_BLOCK=""`) leaves the generated mdp **byte-identical** to before, so existing amber runs are unchanged. The CHARMM36m force field itself is not bundled with GROMACS (only `charmm27.ff` is) — it's the MacKerell **force-switch** port (`charmm36-feb2026_cgenff-5.0`, renamed `charmm36m.ff`) installed under `$HOME/opt/gromacs/ff/` and found via `export GMXLIB` in `site_config.sh` (searched in addition to each build's bundled `top/`, so amber keeps working). **Do NOT use the `ljpme` port** with these force-switch settings — LJ-PME needs `vdwtype = PME` + a different mdp path. Select per job with `FF=charmm36m` (keep `WATER=tip3p`). Verified: pdb2gmx builds the topology ("The Charmm36m force field and the tip3p water model are used") and grompp accepts the force-switch tpr.
+**Fix (applied):** all three engines gate the nonbonded mdp lines on `[[ $FF == charmm* ]]` — CHARMM emits the force-switch block + `DispCorr=no` and forces `CUTOFF_NM=1.2` (with an `[INFO]` override notice); the AMBER branch (`VDW_BLOCK=""`) leaves the generated mdp **byte-identical** to before, so existing amber runs are unchanged. The CHARMM36m force field itself is not bundled with GROMACS (only `charmm27.ff` is) — it's the MacKerell **force-switch** port (`charmm36-feb2026_cgenff-5.0`) installed under `$HOME/opt/gromacs/ff/` and found via `export GMXLIB` in `site_config.sh` (searched in addition to each build's bundled `top/`, so amber keeps working). **Do NOT use the `ljpme` port** with these force-switch settings — LJ-PME needs `vdwtype = PME` + a different mdp path. Select per job with `FF=charmm36-feb2026_cgenff-5.0` (keep `WATER=tip3p`). Verified: pdb2gmx builds the topology ("The Charmm36m force field and the tip3p water model are used") and grompp accepts the force-switch tpr.
+
+**Keep the upstream dated directory name.** The port was briefly installed here as `charmm36m.ff`, which is *not* how these ports are distributed — every release ships a dated directory (`charmm36-jul2022.ff`, `charmm36-feb2026_cgenff-5.0.ff`, …) and you pass that name to `pdb2gmx -ff`. Renaming to a generic `charmm36m` reads better in a submit script but makes `parameters.txt` record `FF=charmm36m` forever, so two runs a year apart log an identical string while a newer port has been dropped into the same directory — an invisible force-field change in a pipeline whose purpose is comparing variants. The mdp gate is a `charmm*` glob, so the dated name needs no code change. (The port's own provenance survives inside `forcefield.itp`'s header — charmm2gmx version + build date — but that describes the directory's *current* contents, not what a past job used.) For usability, `site_config.sh` maps short names to installed ports (`FF_ALIASES`, e.g. `charmm36m`); the engines resolve the alias at STEP 1 via `resolve_ff` and record the **resolved dated name** in `parameters.txt`, so the short name is input sugar only and never reaches the run record. An alias whose target is not in `GMXLIB` fails at STEP 1.
 
 ### GROMACS: `gmx trjconv` cannot combine `-fit` with `-pbc mol` — they must be separate passes
 
@@ -259,3 +261,67 @@ the install is always editable and never a published wheel.
 Related: install with `pip install --no-deps -e .`. conda already provides
 matplotlib/numpy/MDAnalysis/scikit-learn from `environment.yml`; letting pip resolve them
 shadows the conda builds with wheels.
+
+### GROMACS: there is no `pdb2gmx -ff list` — it reads `list` as a force-field name
+
+`gmx_mpi pdb2gmx -f x.pdb -ff list` does **not** print the available force fields (that
+form exists in some other tools' docs and in older tutorials). GROMACS 2024 looks for a
+force field literally named `list` and dies:
+
+```
+Could not find force field 'list' in current directory, install tree or GMXLIB path.
+```
+
+— followed by an `MPI_ABORT` on an MPI build, which looks alarming for what is a typo-class
+error. **Fix:** run `pdb2gmx` with **no** `-ff` and read the interactive menu, or list the
+directories directly: `ls "$GMXLIB"/*.ff` plus `<build>/share/gromacs/top/*.ff`. The real
+check that a force field resolves is a throwaway `pdb2gmx` run with `-ff <name>`; on
+success it prints `Using the <Name> force field in directory <path>`.
+
+### PLUMED/REST2: `partial_tempering` does NOT scale CHARMM CMAP — CHARMM + REST2 is silently wrong
+
+`plumed partial_tempering` scales the solute Hamiltonian by rewriting the processed topology.
+Measured on a real CHARMM36m topology (helix_fusion, 433 marked solute atoms), diffing the
+λ=1.0 against the λ=0.5 topology, the sections it changes are:
+
+```
+151434  [ pairtypes ]
+   865  [ dihedrals ]
+   565  [ atomtypes ]
+   433  [ atoms ]
+   333  [ nonbond_params ]
+```
+
+`[ cmap ]` (41 entries) and `[ cmaptypes ]` (1475 entries) are **byte-identical between λ=1.0
+and λ=0.5** — the script has no `cmap` handling at all (`grep -i cmap partial_tempering.sh`
+returns nothing). CMAP is CHARMM's backbone φ/ψ cross-term correction and applies **only to the
+protein**, i.e. exactly the hot region, so a CHARMM REST2 run scales charges, LJ and dihedrals
+on the solute while leaving its backbone conformational term at full strength. The solute
+Hamiltonian is only partially scaled, so the effective-temperature ladder is not the one the
+run reports — and the term left unscaled is the one governing secondary-structure sampling,
+which is usually the whole point of the run.
+
+**Neither existing self-check catches it.** The λ=1.0 replica is still exact, so the
+`scale=1.0 → P=1.0` sanity pair passes; exchanges still happen at nonzero rates, so the hrex
+acceptance gate passes too. It looks like a healthy REST2 run.
+
+AMBER force fields in this pipeline (`amber99sb-ildn`, `amber14sb`) have no CMAP, so the
+existing REST2 path is unaffected. (Note `ff19SB` *does* use CMAP — same trap if it is ever
+added.)
+
+**Fix:** treat `FF=charmm*` as unsupported for REST2 and fail at STEP 1 rather than produce a
+plausible-looking wrong ensemble. T-REMD and plain MD have no such restriction — they scale
+nothing, so CHARMM is fully correct there. Lifting the restriction means teaching
+`partial_tempering` to scale `[ cmap ]`/`[ cmaptypes ]` (or pre-scaling the CMAP grids per
+replica), then re-validating.
+
+Unrelated to the GROMACS build: the 2023.5 REST2 build finds `GMXLIB` and builds a CHARMM36m
+topology fine (verified). The problem is the topology *scaling* step, not force-field access.
+
+**Generalize this before adding any force field.** CHARMM is one instance of a class:
+`partial_tempering` scales `[ atoms ] [ atomtypes ] [ nonbond_params ] [ pairtypes ] [ dihedrals ]`
+and silently passes through everything else, so *any* force field with an extra conformational
+term is affected — CMAP (CHARMM, AMBER ff19SB), polarization (Drude), tabulated torsions.
+`docs/FORCE_FIELDS.md` carries the rule and a GPU-free per-force-field check (diff the λ=1.0 and
+λ=0.5 topologies by section, then justify every unchanged section). Run it once per new force
+field; the `charmm*` guard catches only the case we knew about.
