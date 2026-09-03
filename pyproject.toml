@@ -15,10 +15,15 @@ authors = [{ name = "Jack Halpin", email = "jhalpin@mit.edu" }]
 # (site_config.sh / GMXRC) and is deliberately not expressed here — the package
 # version cannot pin the gmx build.
 dependencies = [
-    "matplotlib",
-    "numpy",
-    "MDAnalysis",
-    "scikit-learn",
+    # "matplotlib",
+    # "numpy",
+    # "MDAnalysis",
+    # "scikit-learn",
+    "numpy>=1.23",
+    "matplotlib>=3.5",
+    "MDAnalysis>=2.4",
+    "scikit-learn>=1.2",
+    "mdtraj>=1.10",     # 1.10+ = numpy-2-safe, ships wheels
 ]
 
 [project.optional-dependencies]

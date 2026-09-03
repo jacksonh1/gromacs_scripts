@@ -12,7 +12,7 @@
 export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/scripts/simulation"
 
 # === Replicas & effective-temperature ladder ===
-REPLICAS=16
+REPLICAS=12
 T_MIN=300          # physical temperature (ALL replicas)
 T_MAX=500          # EFFECTIVE max solute temperature (top of the lambda ladder)
 
