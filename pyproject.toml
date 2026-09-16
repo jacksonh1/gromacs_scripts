@@ -35,6 +35,7 @@ gromd-plot-xvg    = "gromd_analysis.xvg:main"
 gromd-plot-dssp   = "gromd_analysis.dssp:main"
 gromd-cluster     = "gromd_analysis.clustering:main"
 gromd-acceptance  = "gromd_analysis.remd_log:main"
+gromd-roundtrip   = "gromd_analysis.remd_roundtrip:main"
 gromd-chain-index = "gromd_analysis.chains:main"
 
 # Flat layout: the package sits at the repo root alongside scripts/, example/,

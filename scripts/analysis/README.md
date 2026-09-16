@@ -40,7 +40,8 @@ The analysis layer is split along one line — **does the step invoke `gmx`?**
 | `gromd-plot-xvg` | `xvg.py` | parse + plot any GROMACS `.xvg` |
 | `gromd-plot-dssp` | `dssp.py` | secondary-structure map |
 | `gromd-cluster` | `clustering.py` | conformational clustering (sklearn) |
-| `gromd-acceptance` | `remd_log.py` | REMD/REST2 exchange acceptance rates |
+| `gromd-acceptance` | `remd_log.py` | REMD/REST2 exchange acceptance rates (local, per pair) |
+| `gromd-roundtrip` | `remd_roundtrip.py` | REMD/REST2 replica mixing: round trips + dwell (global) |
 | `gromd-chain-index` | `chains.py` | per-chain `.ndx` groups from the topology |
 
 Install (once, into the analysis env — `install_python_env.sh` does this for you):

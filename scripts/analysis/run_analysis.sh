@@ -15,6 +15,7 @@
 #
 # Pipeline (MD or REMD):
 #   [REMD only] gromd-acceptance                   — exchange acceptance rates
+#   [REMD only] gromd-roundtrip                     — replica mixing (round trips, dwell)
 #   PBC fix + strip + align → <prefix>_stripped_aligned.{xtc,gro}
 #   protein reference       → <prefix>_init.gro    — minimized RMSD reference
 #   calc_traj_rmsd/rg/rmsf/dssp + gromd-plot-xvg/-dssp   (whole protein/complex)
@@ -82,6 +83,11 @@ if [[ "$MODE" == "REMD" || "$MODE" == "REST2" ]]; then
   echo "[CMD] gromd-acceptance $OUTDIR"
   gromd-acceptance "$OUTDIR" \
     || echo "[WARN] gromd-acceptance failed — re-run the command above"
+  # Replica mixing: round trips + dwell (the global counterpart to the local
+  # acceptance rates above). Reconstructs the walk from the log's Repl ex lines.
+  echo "[CMD] gromd-roundtrip $OUTDIR --plot"
+  gromd-roundtrip "$OUTDIR" --plot \
+    || echo "[WARN] gromd-roundtrip failed — re-run the command above"
 fi
 
 # ── 1. PBC fix + strip + align (+ RMSD reference) → <prefix>_stripped_aligned.* ─
