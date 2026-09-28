@@ -15,7 +15,16 @@
 export GROMACS_SCRIPTS_DIR="/orcd/pool/004/jhalpin/09-fragfold/RELE_simulations/gromacs_REMD/scripts/simulation"
 
 # === Job to analyse ===
-OUTDIR="/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/outputs/output_MD/helix_fusion-2ns-MD-300K-NPT"
+# Round-trip / replica-mixing stats (gromd-roundtrip) are REMD/REST2-only — a
+# plain MD job has no replicas, so that step is skipped for output_MD/... .
+# Point OUTDIR at a T-REMD or REST2 job to get remd_roundtrips.{csv,png}.
+EX=/home/jhalpin/orcd/pool/09-fragfold/RELE_simulations/gromacs_REMD/example/outputs
+# REST2 (16 reps, mixes well → several round trips over 2 ns):
+OUTDIR="$EX/output_REST2/helix_fusion-2ns-REST2-300-400Keff-16reps-NPT-exf-1ps"
+# T-REMD (48 reps; round-trip time ~96 ns, so ~0 round trips over 2 ns — expected):
+# OUTDIR="$EX/output_T-REMD/helix_fusion-2ns-REMD-300-450K-48reps-NPT-exf-1ps"
+# Plain MD (no replicas → no round trips):
+# OUTDIR="$EX/output_MD/helix_fusion-2ns-MD-300K-NPT"
 
 # === Replica slot (T-REMD / REST2 only; ignored for plain MD) ===
 # 000 is the lowest temperature (T-REMD) / lambda=1 (REST2) — the physical ensemble.
