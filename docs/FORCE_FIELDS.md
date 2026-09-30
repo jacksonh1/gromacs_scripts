@@ -6,7 +6,8 @@ compatible with the REST2 engine.
 
 Related: [`PARAMETERS.md`](PARAMETERS.md) (all job parameters),
 [`../scripts/installation/README.md`](../scripts/installation/README.md) (installing a
-force field).
+force field), [`CATION_PI_WYF.md`](CATION_PI_WYF.md) (cation–π / CHARMM36-WYF — why we
+stay on stock `charmm36m`).
 
 ---
 

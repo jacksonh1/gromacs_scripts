@@ -509,4 +509,3 @@ thermodynamic ensemble at a given temperature.
 
 Planned tools:
 - Empirical transition matrix analysis (mixing quality between temperature slots)
-- Round-trip counter (requires per-frame walker trajectory reconstruction from `Repl ex` lines)

@@ -3,14 +3,6 @@
 # warning - This pipeline is under active development
 
 
-# upcoming features (not yet implemented):
-
-- refactoring of the analysis layer to a python package
-- implicit solvent support (currently only explicit water)
-- adjustable force-field support (currently only AMBER99SB-ILDN)
-
-
-
 GROMACS 2024.3 pipelines for characterizing **folded protein structures** on single-node GPU clusters (SLURM). The input can be any folded pose — a de novo design, a crystal/cryo-EM structure, a predicted model, or a mutant variant. Built for the Keating lab at MIT; configurable for any cluster via `site_config.sh`.
 
 Three engines are provided:
@@ -144,10 +136,13 @@ Two parameter gotchas worth knowing before your first run:
 
 ## Pipeline Overview
 
-Both engines share the same system-building, equilibration philosophy (position restraints
+All three engines share the same system-building, equilibration philosophy (position restraints
 held through equilibration to preserve the input pose), scratch handling, and post-analysis.
 They differ in how production is sampled: T-REMD runs many temperature replicas with
-exchanges; plain MD runs a single trajectory.
+exchanges; REST2 runs an effective-temperature (solute-tempering) ladder at one physical
+temperature; plain MD runs a single trajectory. The T-REMD and MD steps are tabled below;
+REST2's per-replica scaling and hrex acceptance gate are in
+`scripts/simulation/REST2-output-guide.md`.
 
 ### T-REMD — `scripts/simulation/REMD-gromacs.sbatch`
 
@@ -158,14 +153,17 @@ exchanges; plain MD runs a single trajectory.
 | 2 | Compute geometric temperature ladder |
 | 3 | Build system: pdb2gmx → editconf → solvate → genion |
 | 4 | Energy minimization (steepest descent) |
-| 5 | NPT density equilibration (iterative, convergence-checked) |
-| 6 | Prepare per-replica equilibration inputs (NVT, or NPT if `ENSEMBLE=NPT`) |
-| 7 | Run per-replica equilibration (all replicas in parallel via MPI) |
-| 8 | Prepare REMD production inputs |
-| 9 | Run T-REMD production (NVT or NPT) |
-| 10 | Finalize outputs, create trajectory symlinks |
-| 11 | Write parameters log |
-| 12 | Post-analysis: acceptance rates + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
+| 5 | Heat: NVT thermalization at `T_MIN` (restrained; velocities generated here) |
+| 6 | NPT density equilibration (iterative, convergence-checked) |
+| 7 | Prepare per-replica equilibration inputs (NVT, or NPT if `ENSEMBLE=NPT`) |
+| 8 | Run per-replica equilibration (all replicas in parallel via MPI) |
+| 9 | Prepare REMD production inputs |
+| 10 | Run T-REMD production (NVT or NPT) |
+| 11 | Export final PDB |
+| 12 | Write parameters log |
+| 13 | Post-analysis: acceptance rates + round-trip mixing + PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering (rep000) |
+| 14 | Make the scratch archive self-contained (`SYMLINK_BULK=1` only) |
+| 15 | Summary |
 
 Stage folders: `build/ → em/ → heat/ → density/ → equil/ → prod/`. See
 `scripts/simulation/REMD-output-guide.md` for a full description of all output files.
@@ -185,9 +183,11 @@ and optionally single-structure stability (#1) and flexible-region (#2) characte
 | 5 | NPT density equilibration (restrained, iterative, convergence-checked) |
 | 6 | Relax — unrestrained NPT (optional; only if `RELAX_NS > 0`) |
 | 7 | Run production MD (NPT, unrestrained) |
-| 8 | Finalize outputs, create trajectory symlinks |
+| 8 | Export final PDB |
 | 9 | Write parameters log |
 | 10 | Post-analysis: PBC/strip/align + RMSD/Rg/RMSF/DSSP + clustering |
+| 11 | Make the scratch archive self-contained (`SYMLINK_BULK=1` only) |
+| 12 | Summary |
 
 Stage folders: `build/ → em/ → heat/ → density/ → [relax/] → prod/`. By default
 (`RELAX_NS=0`) restraints release at the **start of production**, so the trajectory captures
@@ -286,7 +286,9 @@ a large disk).
 
 Post-analysis runs automatically at the end of **both** engines' jobs — PBC fix, protein
 strip + backbone align, then RMSD / Rg / RMSF / DSSP and conformational clustering. T-REMD
-additionally computes replica-exchange acceptance rates. The same `scripts/analysis/` tools
+and REST2 additionally compute replica-exchange acceptance rates (local swap probability) and
+round-trip mixing (`gromd-roundtrip` — how many full T_min↔T_max cycles each configuration
+completes, the global efficiency metric). The same `scripts/analysis/` tools
 serve both engines (the analysis layer detects MD vs REMD automatically), and multi-chain
 complexes are handled by a dedicated path. See `scripts/analysis/README.md` for the full
 script reference.
@@ -304,6 +306,7 @@ auto-detects MD vs T-REMD vs REST2 from the job layout, so one command covers al
 bash   scripts/analysis/run_analysis.sh    OUTDIR          # plain MD
 bash   scripts/analysis/run_analysis.sh    OUTDIR 000      # T-REMD / REST2, slot 000
 gromd-acceptance OUTDIR                                   # acceptance rates alone (target 20–30%)
+gromd-roundtrip  OUTDIR --plot                           # replica mixing: round trips + dwell
 
 # As a SLURM job (long trajectories) — copy, set OUTDIR, run:
 cp example/submit_jobs/submit_analysis.sh my_analysis.sh
@@ -344,13 +347,16 @@ gromacs_REMD/
 │   ├── dssp.py                    # secondary-structure map     (gromd-plot-dssp)
 │   ├── clustering.py              # conformational clustering   (gromd-cluster)
 │   ├── remd_log.py                # exchange acceptance rates   (gromd-acceptance)
+│   ├── remd_roundtrip.py          # replica mixing / round trips (gromd-roundtrip)
 │   └── chains.py                  # per-chain .ndx groups       (gromd-chain-index)
 ├── scripts/
 │   ├── simulation/             # Simulation engines (do not edit)
 │   │   ├── REMD-gromacs.sbatch    # T-REMD engine
+│   │   ├── REST2-gromacs.sbatch   # REST2 engine (GROMACS 2023.5 + PLUMED)
 │   │   ├── MD-gromacs.sbatch      # Plain-MD engine
 │   │   ├── config_example.sh      # Job config template (copy and edit)
 │   │   ├── REMD-output-guide.md   # T-REMD output file reference
+│   │   ├── REST2-output-guide.md  # REST2 output file reference
 │   │   └── MD-output-guide.md     # Plain-MD output file reference
 │   ├── analysis/               # GROMACS-driving shell steps (see scripts/analysis/README.md)
 │   │   ├── run_analysis.sh        # Whole post-analysis, re-runnable on a finished job
@@ -367,6 +373,7 @@ gromacs_REMD/
     ├── input_pdbs/             # Example protein structures
     └── submit_jobs/
         ├── submit_REMD.sh     # T-REMD submission wrapper (reads site_config.sh)
+        ├── submit_REST2.sh    # REST2 submission wrapper (reads site_config.sh)
         ├── submit_MD.sh       # Plain-MD submission wrapper (reads site_config.sh)
         └── submit_analysis.sh # Re-run analysis on an existing output dir
 ```
