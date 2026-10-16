@@ -77,7 +77,7 @@ list, and `validate_params.py`'s allowlist + rules.
 | `OUTBASE` | basename of `PDB_IN` | Short name used in filenames. |
 | `OUTDIR` | `remd_`/`md_`/`rest2_` + `$OUTBASE` | Output directory. **Must be on the same filesystem as the submit directory** (`solvate`/`genion` do a cross-fs-fatal `rename()`). |
 | `FF` | `amber99sb-ildn` | `pdb2gmx` force field. Accepts an alias from `FF_ALIASES` in `site_config.sh` (e.g. `charmm36m`); the engine resolves it and records the real dated name in `parameters.txt`. See [Force fields](#force-fields). |
-| `WATER` | `tip3p` | Water model, resolved **inside** the FF directory, so it always matches the force field. Do not cross them. |
+| `WATER` | `tip3p` | Water model, resolved **inside** the FF directory, so it always matches the force field. Do not cross them. **REST2:** checked against the FF's `watermodels.dat` at STEP 1, and FF-specific names (`a99SBdisp_water`) and 4-/5-site models are handled (`FORCE_FIELDS.md`). **MD / T-REMD:** still passed straight to `pdb2gmx -water` and solvated in the 3-site `spc216.gro` box — use a built-in 3-site water there. |
 | `BOX_SHAPE` | `dodecahedron` | `editconf -bt`. Dodecahedron ≈ truncated octahedron, ~29 % fewer waters than cubic. |
 | `BOX_BUFFER` | `1.0` | nm from solute to box edge (1.0 nm = 10 Å). |
 | `NEUTRALIZE` | `1` | `0`/`1`. Add counter-ions to neutralize net charge. |
@@ -173,7 +173,7 @@ differences in meaning, and one restriction:
 | `T_MAX` | `450` | The maximum **effective solute** temperature. The ladder scales the solute's force field, not the thermostat. |
 | `REPLICAS` | SLURM `-n`, else `24` | Fewer replicas than T-REMD reach the same range, because only the solute is heated. |
 | `REPLEX_PS` | `1.0` | Already at the safe value. |
-| `FF` | `amber99sb-ildn` | **CHARMM force fields are rejected** — see below. |
+| `FF` | `amber99sb-ildn` | **CHARMM (and any CMAP force field) is rejected** — see below. `a99sb-disp` is validated. |
 
 ### Force fields are not all REST2-compatible
 
@@ -195,10 +195,14 @@ rates so the acceptance gate passes.
 tool*, not of the GROMACS build or of REST2 as a method — the REST2 GROMACS 2023.5
 build reads `GMXLIB` and builds CHARMM topologies fine.
 
-- **AMBER** (`amber99sb-ildn`, `amber14sb`) — no CMAP. Supported.
-- **CHARMM** (`charmm36m`, any `charmm*`) — CMAP. Rejected.
-- **AMBER ff19SB** — also uses CMAP. It would hit the same problem and is not currently
-  guarded by name; do not use it with REST2.
+- **AMBER** (`amber99sb-ildn`) — no CMAP. Supported.
+- **a99SB-disp** (`FF=a99sb-disp WATER=a99SBdisp_water`) — no CMAP; its backbone O–H
+  `[ nonbond_params ]` override is scaled correctly. Supported, validated 2026-09-28
+  (record in [`FORCE_FIELDS.md`](FORCE_FIELDS.md)).
+- **CHARMM** (`charmm36m`, any `charmm*`) — CMAP. Rejected at STEP 1.
+- **AMBER ff19SB** — also uses CMAP. Rejected at STEP 7 by `check_rest2_topology.py`,
+  which inspects the scaled topologies by content and fails on `[ cmap ]` from any force
+  field (and checks every scaled charge, ε and torsion constant against λ).
 - Lifting the restriction means teaching `partial_tempering` to scale the CMAP grids,
   then re-validating.
 
@@ -224,7 +228,8 @@ FF="charmm36-feb2026_cgenff-5.0"     # the real directory name — equivalent
 
 The engine resolves the alias at STEP 1, logs the expansion, and writes the **resolved**
 name into `parameters.txt`, so a finished run always records the exact release it used.
-Force fields bundled with GROMACS (`amber99sb-ildn`, `amber14sb`, …) are used by name
+Force fields bundled with GROMACS (`amber99sb-ildn`, …; `ls` the build's
+`share/gromacs/top` — the builds here do not ship `amber14sb`) are used by name
 directly. Installing a new one is Step 7 of
 [`scripts/installation/README.md`](../scripts/installation/README.md).
 

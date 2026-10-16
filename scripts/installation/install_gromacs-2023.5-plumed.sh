@@ -38,7 +38,10 @@
 set -uo pipefail
 
 GMX_VER=2023.5
-PREFIX="$HOME/opt/gromacs/${GMX_VER}-plumed"          # parallel to 2024.3-plumed
+PREFIX="${PREFIX:-$HOME/opt/gromacs/${GMX_VER}-plumed}"   # parallel to 2024.3-plumed
+# Optional extra cmake flags. The GPU-energy-precision build (see README Step 5b) uses
+#   PREFIX=$HOME/opt/gromacs/2023.5-plumed-dblE EXTRA_CMAKE_ARGS="-DGMX_CUDA_TARGET_SM=89"
+EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS:-}"
 SRC="${SRC:-/orcd/pool/004/jhalpin/installations/gromacs-2023.5}"   # pre-downloaded, clean, unpatched
 
 # ── Environment ──────────────────────────────────────────────────────────────
@@ -56,7 +59,7 @@ source ~/plumed.sh                                     # sets PLUMED_KERNEL / LD
 
 echo "[INFO] host=$(hostname)"
 echo "[INFO] plumed: $(command -v plumed)  ($(plumed info --version 2>/dev/null))"
-echo "[INFO] target: $PREFIX"
+echo "[INFO] target: $PREFIX  (extra cmake: ${EXTRA_CMAKE_ARGS:-none})"
 
 # ── CUDA note ────────────────────────────────────────────────────────────────
 # cuda/12.4.0 (loaded above via deprecated-modules) is a good match for GROMACS
@@ -97,6 +100,7 @@ cmake .. \
   -DCMAKE_C_FLAGS="-march=skylake-avx512" \
   -DCMAKE_CXX_FLAGS="-march=skylake-avx512" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  $EXTRA_CMAKE_ARGS \
   || { echo "[ERROR] cmake failed — if it's a CUDA error, try the CPU-only fallback -DGMX_GPU=OFF (see CUDA note above)"; exit 1; }
 
 # ── Build ────────────────────────────────────────────────────────────────────

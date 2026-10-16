@@ -326,6 +326,14 @@ term is affected — CMAP (CHARMM, AMBER ff19SB), polarization (Drude), tabulate
 λ=0.5 topologies by section, then justify every unchanged section). Run it once per new force
 field; the `charmm*` guard catches only the case we knew about.
 
+**Now enforced by content, for every force field (2026-09-28):** STEP 7 runs
+`scripts/simulation/check_rest2_topology.py` on `topol_rep000` vs the lowest-λ replica. It
+checks the scaled *numbers* (hot charges ×√λ, hot ε ×λ, `[ nonbond_params ]`/`[ pairtypes ]`
+×λ or ×√λ, torsion k ×√λ per hot end atom, bonds/angles untouched) and fails on any `[ cmap ]`,
+`[ cmaptypes ]`, polarization or restraint section, or a `[ dihedrals ]` funct outside
+{1,2,3,4,5,9}. On CHARMM36m it fails on exactly the two CMAP sections. The `charmm*` name check
+stays as an early exit before any compute.
+
 ---
 
 ### GROMACS: restarting a density segment from a `.gro` silently loses the barostat's state
@@ -471,3 +479,138 @@ policy governs the bulky PDBs, the cheap metadata always survives in `OUTDIR`.
 **Reading the report:** dumps from `em/` are common and usually benign — strained input geometry
 that EM then recovers from (`1a22-fixed` does it every run; `helix_fusion` never does). Dumps
 from `heat/`, `density/` or production mean a simulation going unstable and deserve a look.
+
+---
+
+### GROMACS: `pdb2gmx -water` only accepts built-in names, and `solvate` needs a box with the model's site count
+
+`pdb2gmx -water` is an enumerated option (`select none spc spce tip3p tip4p tip4pew tip5p
+tips3p`), not a lookup into the force field's `watermodels.dat`. A force-field-specific water —
+a99SB-disp's `a99SBdisp_water` — fails at the command-line parser:
+
+```
+Invalid command-line options
+  In command-line option -water
+    Invalid value: a99SBdisp_water
+```
+
+The model can only be chosen through `-water select`, answering the menu (which lists
+`watermodels.dat` in file order, 1-based, then "None") on stdin. Because a menu number could
+silently pick the wrong model if the file changed, confirm the result: the topology must
+`#include ".../<WATER>.itp"`.
+
+Separately, the engine used to solvate with a hardcoded `spc216.gro`. That is a 3-site box: a
+4-site water (TIP4P-Ew, TIP4P-D, `a99SBdisp_water`, OPC) then has 3 atoms per molecule in the
+`.gro` and 4 in the topology — a fatal grompp mismatch at best. The box must match the model's
+site count (`tip4p.gro` for 4-site, `tip5p.gro` for 5-site), or be the force field's own
+`<WATER>.gro` if it ships one (a99SB-disp does; its atom names `OW HW2 HW3 MW4` match its
+`.itp`, where GROMACS's `tip4p.gro` says `OW HW1 HW2 MW` and grompp warns about 3 non-matching
+names per water — harmless but noisy). The a99SB-disp box upstream once had vacuum gaps (issue
+#1, fixed; the current one is a clean 7.5 nm cube).
+
+**Fix:** `scripts/simulation/resolve_water.py FF WATER <GMXLIB dirs> $GMXDATA/top` runs at
+STEP 1 (so a bad `WATER` fails before any compute) and prints the `-water` argument, the menu
+answer, the site count and the box; STEP 3 uses them and checks the `#include`. 3-site built-ins
+resolve to exactly the old `-water <WATER>` + `spc216.gro` (verified: an amber99sb-ildn/TIP3P
+pilot's `processed.top`/`topol_rep*.top` rebuild identically).
+
+---
+
+### GROMACS: an input PDB with `CYX` residue names gets NO disulfide bonds from `pdb2gmx`
+
+`pdb2gmx` finds disulfides with `specbond.dat` (`CYS SG 1 CYS SG 1 0.2 CYX CYX`): it matches
+residues **named `CYS`** whose SG atoms are within 0.2 nm, links them, and renames them `CYX`.
+A residue that is already called `CYX` in the input — as tleap writes it, and as many
+Amber-prepared PDBs have it — does not match, so the bond is silently not made: no
+"Linking CYS-… and CYS-…" line in the log, the SG atoms carry the `CYX` template (no HG) but are
+not bonded to each other, and a simulation lets them drift apart. Found while cross-checking
+a99SB-disp against sander: the GROMACS bond energy was fine, but the Amber topology (which had
+the S–S bond) blew up to 3×10⁵ kcal/mol on the GROMACS frames.
+
+**Fix:** feed `pdb2gmx` `CYS`, never `CYX`, and check the log for one `Linking` line per
+disulfide. The engine's inputs so far (e.g. `gp130_218-Y_binder_only.pdb`) use `CYS`.
+
+---
+
+### Validating a GROMACS AMBER-family port against tleap: tleap is not automatically the ground truth
+
+When a GROMACS port and an Amber build of "the same" force field disagree, find the term
+before blaming the port. Two things seen validating a99SB-disp (`docs/FORCE_FIELDS.md`,
+validation record):
+
+- **tleap added a generic torsion on top of a specific one.** For serine `OG-CB-CA-C` the
+  frcmod has both the specific `C-CT-C8-OH` (1-fold) and the wildcard `X-CT-C8-X` (3-fold).
+  Amber and viparr rules say the exact match replaces the wildcard; tleap nevertheless emitted
+  both terms for 8 of the 9 serines in gp130 (the ninth, and the serine in a test peptide,
+  got only the specific term — same atom types, so the trigger is not the typing), up to
+  1.3 kJ/mol each.
+  The GROMACS port and the Desmond definition have the specific term only. Judge against the
+  force field's definitive source (here the authors' Desmond files), not against whichever
+  implementation you happen to trust.
+- **Stock GROMACS `amber99sb-ildn` has a constant torsion offset vs tleap `ff99SBildn`**
+  (−74.64 kJ/mol on a 23-residue peptide, identical in every frame). A constant changes no
+  force and cancels in the exchange criterion; it is a representation difference, not a bug.
+  Look at the *spread* of a difference across frames, not its mean.
+
+Compare per torsion as a *function of φ*, not term by term: Amber stores some a99SB-disp
+torsions with arbitrary phases (e.g. 50.05°) while the GROMACS port expands them into 0°/90°
+cosine/sine terms plus a constant — equal functions, different parameter lists.
+
+---
+
+### PLUMED/REST2: on GPU, hrex exchange energies carry ~0.37 kT of random noise — identical replicas accept only ~80%
+
+Two replicas with **identical** Hamiltonians (`TEMPS_LIST="300,300"`, both λ = 1.000000) must
+exchange with probability exactly 1: the REST2 criterion is a difference of energies of the
+same configurations under the same topology. On the engine's GPU path (`-nb gpu -pme gpu
+-bonded gpu`) they accepted **84%** (a99SB-disp) and **80%** (amber99sb-ildn/TIP3P) of swaps
+over 50 attempts. The exchange block in `rest2.log` shows where it comes from:
+
+```
+Repl 0 <-> 1  dE_term = -0.000e+00 (kT)     GROMACS' own term: exactly 0
+  dpV = -0.000e+00  d =  0.000e+00           pressure-volume term: exactly 0
+dplumed =  3.007e-01  dE_Term =  3.007e-01 (kT)   PLUMED's re-evaluated energies: NOT 0
+Repl pr   .74
+```
+
+`dplumed` over 50 attempts: mean 0.009 kT (zero within error), **sd 0.36–0.38 kT** for both
+force fields. Rerunning the **same tprs on CPU** (`-nb cpu -pme cpu -bonded cpu`): `dplumed`
+exactly 0 on every attempt, P = 1.0 on 25/25. With `-nb gpu -pme cpu` the noise stays (sd
+0.39 kT), so it is the **GPU nonbonded kernel**: its energy accumulation order is
+non-deterministic, so the same configuration evaluates to a slightly different energy each
+time (~3 ppm of a −1.2×10⁵ kT total), and hrex compares energies from separate evaluations.
+(`-nb cpu -pme gpu` is not a valid combination.) The original REST2 validation
+(`knowledgebase/plans/REST2-pipeline.md`) was CPU-only, which is why P = 1.0 was seen there.
+
+**What it means:** every exchange on a real ladder is decided with ~0.37 kT of zero-mean random
+error added to Δ. That lowers acceptance a little and — because noise enters the Metropolis
+test non-linearly — slightly violates detailed balance (order σ²/2 ≈ 0.07 kT in the exchange
+weights). It is **not force-field-specific** and applies to **every GPU REST2 run so far**,
+including the amber99sb-ildn pilot. The STEP 11 gate does not see it (it only requires a
+nonzero rate).
+
+**Options** (decision pending, 2026-09-28): accept and quote it as a known small bias; or run
+REST2 fully on CPU (exact; measured 97 ns/day per replica at 8 cores/replica on gp130 in
+a99SB-disp water vs 162 ns/day/replica for the 24-replica, 1-GPU GPU pilot). **Diagnose it on
+any new setup with an identical-λ run and read the `dplumed` lines, not just the acceptance.**
+
+---
+
+### Python packaging: a NEW `gromd-*` entry point is not installed until you re-run `pip install -e .`
+
+An editable install (`pip install -e . --no-deps`) links the package *code* live, but the
+console-script wrappers in `$CONDA_PREFIX/bin` are generated only at install time. When
+`gromd-roundtrip` was added to `pyproject.toml` (commit "added round trips"), `groMD_env` was
+never reinstalled, so every job since logged only
+
+```
+run_analysis.sh: line 89: gromd-roundtrip: command not found
+[WARN] gromd-roundtrip failed — re-run the command above
+```
+
+and finished "successfully" with no replica-mixing report — including all REST2 campaigns run
+after that commit. The other tools worked because their wrappers predate it.
+
+**Fix:** after adding or renaming a `[project.scripts]` entry, run
+`pip install -e . --no-deps` in `groMD_env` (done 2026-09-28), and check with
+`which gromd-<name>`. Old jobs can be backfilled with `gromd-roundtrip OUTDIR --plot`.

@@ -21,8 +21,9 @@ WATER="tip3p"
 `FF` is passed to `pdb2gmx -ff`. It is the force-field **directory name minus `.ff`**,
 and may be either:
 
-- a force field **bundled with GROMACS** (`amber99sb-ildn`, `amber14sb`, `charmm27`, …),
-  found in the build's own `share/gromacs/top/`; or
+- a force field **bundled with GROMACS** (`amber99sb-ildn`, `charmm27`, …), found in the
+  build's own `share/gromacs/top/` (`ls` it to see what your build ships — the 2023.5 and
+  2024.3 builds here do **not** include `amber14sb`); or
 - one **installed under `GMXLIB`** (exported by `site_config.sh`), found in addition to
   the bundled ones; or
 - an **alias** from `FF_ALIASES` in `site_config.sh`.
@@ -35,8 +36,13 @@ Ports ship with the release date in the directory name, which is correct but a m
 ```bash
 declare -A FF_ALIASES=(
   [charmm36m]="charmm36-feb2026_cgenff-5.0"
+  [a99sb-disp]="a99SBdisp-25e729d"
 )
 ```
+
+A port with no upstream release name (a99SB-disp is a GitHub repo, not a dated release) is
+installed under the **pinned commit** instead — `a99SBdisp-25e729d.ff` — so the run record
+still says exactly which parameters were used.
 
 The engine resolves the alias at STEP 1, logs the expansion, and writes the **resolved**
 name into `parameters.txt`. The alias is input sugar only — the run record always names
@@ -56,6 +62,20 @@ puts the ambiguity back into the run record, which is the thing the alias avoids
 `WATER` is resolved **inside** the force-field directory, so `tip3p` means standard
 TIP3P under AMBER and the CHARMM-modified (LJ-on-H) TIP3P under CHARMM, automatically.
 Each force field is validated only with its matched water — never cross them.
+
+`WATER` must be a model listed in that force field's `watermodels.dat`; the REST2 engine
+checks this at STEP 1 (`scripts/simulation/resolve_water.py`) and fails before any compute
+otherwise. The same step handles two things `pdb2gmx`/`solvate` do not do for you:
+
+- **Force-field-specific water names.** `pdb2gmx -water` only accepts GROMACS's built-in
+  names (`spc spce tip3p tip4p tip4pew tip5p tips3p`). A model such as a99SB-disp's
+  `a99SBdisp_water` is selected through `-water select` with its menu number, and the
+  engine then confirms the topology includes `<WATER>.itp`.
+- **The solvent box must match the model's site count.** A 4-site water in the 3-site
+  `spc216.gro` box is a fatal grompp mismatch. The box is the force field's own
+  `<WATER>.gro` if it ships one (its atom names match the `.itp`), else `spc216.gro` /
+  `tip4p.gro` / `tip5p.gro` by site count. 3-site built-ins resolve to exactly the old
+  `-water <WATER>` + `spc216.gro`, so existing TIP3P runs build byte-identically.
 
 ### CHARMM changes the mdp
 
@@ -137,20 +157,70 @@ The REST2 engine therefore **rejects `FF=charmm*` at STEP 1**. This is a limitat
 the scaling tool, not of the GROMACS build (the 2023.5 REST2 build reads `GMXLIB` and
 builds CHARMM topologies fine) and not of REST2 as a method.
 
+### The automatic check (STEP 7)
+
+The name check above only catches CHARMM, and only because someone knew to write it. So
+every REST2 run also checks the scaled topologies **by content** at STEP 7:
+`scripts/simulation/check_rest2_topology.py` compares `topol_rep000.top` (λ=1) with the
+lowest-λ replica and fails the job unless
+
+- every hot charge is ×√λ, every hot atom type's LJ ε is ×λ, and every
+  `[ nonbond_params ]` / `[ pairtypes ]` override is ×λ (both types hot) or ×√λ (one hot);
+- every torsion's force constants are ×√λ per hot atom in positions 1 and 4;
+- bonds, angles and everything else are unchanged; and
+- no section `partial_tempering` cannot scale (`[ cmap ]`, `[ cmaptypes ]`,
+  polarization, restraints, …) and no `[ dihedrals ]` function type outside
+  {1,2,3,4,5,9} is present.
+
+It checks numbers, not just "did the section change", so a partly applied scaling fails as
+well as a missing one. On CHARMM36m it fails on exactly `[ cmaptypes ]` and `[ cmap ]`;
+on amber99sb-ildn and a99SB-disp it passes. Its output is kept in
+`topol/check_rest2_topology.log`.
+
 ### Known status
 
 | Force field | REST2 | Why |
 |---|---|---|
-| `amber99sb-ildn`, `amber14sb` | **supported** | no CMAP; all solute terms are scaled |
-| `charmm36m` (any `charmm*`) | **rejected at STEP 1** | CMAP, unscaled |
-| AMBER **ff19SB** | **do not use** | also uses CMAP — same failure, **not** caught by the `charmm*` guard |
-| Drude / polarizable | **do not use** | polarization terms are not scaled |
-| anything else new | **unknown — run the check below** | |
+| `amber99sb-ildn` | **supported** | no CMAP; all solute terms are scaled |
+| `a99sb-disp` (`a99SBdisp-25e729d`), `WATER=a99SBdisp_water` | **supported — validated 2026-09-28** | no CMAP; backbone O–H `[ nonbond_params ]` override scaled correctly; see the validation record below |
+| `amber14sb` | supported in principle (no CMAP) | not installed in the builds here; run the check below if you install a port |
+| `charmm36m` (any `charmm*`) | **rejected at STEP 1** (and STEP 7) | CMAP, unscaled |
+| AMBER **ff19SB** | **rejected at STEP 7** | CMAP, unscaled; the cluster's `amber19sb.ff` also needs GROMACS ≥2026 syntax the REST2 build cannot read |
+| Drude / polarizable | **rejected at STEP 7** | polarization terms are not scaled |
+| anything else new | **unknown — validate it (below)** | |
 
-### How to check a new force field
+### Validating a new force field for REST2
 
-Do this **once per force field**, before any production REST2 run. It takes a couple of
-minutes and needs no GPU.
+Two independent questions, both once per force field, both CPU-only:
+
+1. **Is the scaling right?** `scripts/validation/validate_rest2_scaling.sh` builds the
+   λ=1, all-atoms-hot and protein-hot topologies from a solvated system and checks every
+   energy term's ratio against the unscaled topology, frame by frame, using energy groups
+   for the protein/water split:
+
+   ```bash
+   bash scripts/validation/validate_rest2_scaling.sh em.gro system.top /tmp/v2 0.5 [traj.xtc]
+   ```
+
+   | check | expected |
+   |---|---|
+   | (a) protein hot, λ=1 | every term ×1 (tol 1e-6) |
+   | (b) all atoms hot, λ | bonds/angles ×1, every other term (incl. dispersion correction, PME reciprocal) ×λ |
+   | (c) protein hot, λ | protein–protein ×λ, protein–water ×√λ, water–water ×1, torsions and 1-4 ×λ |
+
+2. **Is the port itself right?** A GROMACS port is a hand conversion, and a single wrong
+   torsion goes unnoticed by (1). Compare it term by term against an independent
+   implementation of the same force field on identical coordinates (for AMBER-family
+   force fields: tleap + sander from AmberTools), over tens of varied conformations, and
+   compare the per-torsion parameters to find the exact line when a term disagrees. See
+   the a99SB-disp record below for what that looks like and what to expect.
+
+The manual section-diff below is what the STEP 7 tool automates; keep it for looking at
+an unfamiliar topology by eye.
+
+### Manual section-diff (reference)
+
+It takes a couple of minutes and needs no GPU.
 
 ```bash
 REPO=/path/to/gromacs_REMD
@@ -256,3 +326,81 @@ You have three options, in order of effort:
 
 Add it to the "Known status" table above and to `FF_ALIASES` in `site_config.sh`, and
 record what you measured. The next person should not have to rediscover it.
+
+---
+
+## Validation record: a99SB-disp (2026-09-28)
+
+**Port:** `github.com/paulrobustelli/Force-Fields`, `Gromacs_FFs/a99SBdisp.ff` at commit
+`25e729d` (2025-01-27), installed unmodified as `$GMXLIB/a99SBdisp-25e729d.ff`. The
+authors' definitive version is the Desmond/viparr one in the same repo; they state the
+GROMACS port is "not guaranteed bug-free", and its history has real fixes (NTHR angles
+2021, CPRO improper 2022, HIP improper 2024, ion LJ Oct 2024). Use it with its own water,
+`WATER=a99SBdisp_water` (TIP4P-D with increased dispersion; 4-site) and the AMBER
+nonbonded settings (1.0 nm, PME, `DispCorr=EnerPres` — the published non-Desmond runs
+used a 10 Å cutoff with PME under Amber's default long-range dispersion correction).
+
+**Port fidelity** — GROMACS 2023.5 `mdrun -rerun` vs AmberTools `sander` (Amber-format
+a99SB-disp from the same repo), identical coordinates, vacuum, no cutoff, 51 frames from
+500 K MD each:
+
+| term | 23-residue peptide (all 20 aa + HID/HIE/HIP, termini) | gp130 binder (2 disulfides) |
+|---|---|---|
+| bond | 2.4e-5 | 3.7e-5 |
+| angle | 8.3e-6 | 7.1e-6 |
+| torsions (proper + improper) | 7.7e-6 | 8.5e-6 * |
+| LJ-14 | 8.3e-6 | 6.3e-6 |
+| Coulomb-14 | 1.4e-5 | 3.8e-5 |
+| LJ | 1.2e-5 | 1.2e-5 |
+| Coulomb | 5.7e-5 | 4.8e-5 |
+
+(max relative difference over all frames; the ~1e-5 floor is single precision plus the
+two codes' Coulomb constants differing by 3.5e-5 — the amber99sb-ildn control gives the
+same floor.) Findings worth knowing:
+
+- \* **tleap, not the port, was wrong on serine.** On gp130, sander's torsion energy was
+  up to 4 kJ/mol off. Per-torsion comparison put it on the serine `OG-CB-CA-C` torsion:
+  tleap had added the generic `X-CT-C8-X` 3-fold term on 8 of 9 serines as well as the
+  specific `C-CT-C8-OH` 1-fold term. The Desmond definition has only the specific term
+  (viparr: exact match beats wildcard), and so does the GROMACS port. With tleap's extra
+  term removed the gp130 torsions agree to 8.5e-6. **If you validate an AMBER-family port
+  against tleap, judge disagreements against the Desmond/original definition.**
+- **The backbone O–H override applies to 1-4 pairs in both codes.** Amber's `LJEDIT
+  OB HB` and GROMACS's `[ nonbond_params ] OB HB` both enter the generated 1-4 LJ
+  (removing either shifts LJ-14 by the same 0.036 kJ/mol on the peptide), so O(i)–H(i+1)
+  is treated identically. Under REST2 the scaled `OB_ HB_` entry therefore scales those
+  1-4 terms too, as it should.
+- **HIP works** on this build despite upstream issue #25; the HIP improper is listed in a
+  different atom order than tleap's but is energetically equivalent (within 0.01 kJ/mol
+  over the hot frames).
+- **Water** matches the Desmond definition (charges H +0.59 / M −1.18, O σ 3.165 Å
+  ε 0.238764 kcal/mol, M-site 0.131937768, 0.9572 Å / 104.52°).
+- **Control:** GROMACS's *stock* `amber99sb-ildn` vs tleap `ff99SBildn` shows the same
+  ~1e-5 floor on every term except torsions, which carry a **constant** −74.64 kJ/mol
+  offset (identical in every frame). That is a representation difference in the stock
+  port's torsion constants — no force, no exchange-criterion effect — not an error.
+
+**REST2 scaling** (`validate_rest2_scaling.sh`, solvated gp130 in `a99SBdisp_water`,
+λ=0.5): (a) λ=1 equals the unscaled topology on all 22 terms to 1e-6; (b) all-hot: bonds
+and angles 1.000000, everything else 0.500000–0.500001; (c) protein-hot: protein–protein
+0.500000, protein–water 0.707107, water–water 1.000000, torsions and 1-4 0.500000. The
+same script passes on amber99sb-ildn/TIP3P at λ=0.35.
+
+**Engine runs** (gp130, 300–600 K effective ladder, 24 replicas, 1 L40S, NPT, 2 ns; data in
+`data/rest2_a99sbdisp_validation/`):
+
+| | amber99sb-ildn / TIP3P (pilot `rep24_gpu1`) | a99SB-disp / `a99SBdisp_water` |
+|---|---|---|
+| mean neighbour acceptance (min–max, 23 pairs) | 0.449 (0.38–0.50) | 0.443 (0.39–0.51) |
+| ns/day per replica | 162 | 114 (4-site water, ~30% slower) |
+| λ=1 backbone RMSD mean / max | 2.6 / 4.1 Å | 1.7 / 2.4 Å |
+
+STEP 7's `check_rest2_topology.py` passed; no LINCS/SETTLE warnings; λ=1 replica at
+300.0 K. System density 1025 kg/m³ (vs 1013 with TIP3P, which is known to be under-dense);
+**pure `a99SBdisp_water`: 995.1 ± 0.7 kg/m³ at 300 K, 1 bar** (experiment 996.5).
+
+**Identical-λ exchange check** (2 replicas, both λ=1): acceptance 84% on GPU, not 100%.
+This is GPU energy noise in PLUMED's hrex re-evaluation (`dplumed` sd 0.36 kT), identical
+for amber99sb-ildn (80%) and absent on CPU (exactly 1.0) — see `knowledgebase/GOTCHAS.md`,
+"on GPU, hrex exchange energies carry ~0.37 kT of random noise". It is not specific to
+a99SB-disp and applies to every GPU REST2 run.

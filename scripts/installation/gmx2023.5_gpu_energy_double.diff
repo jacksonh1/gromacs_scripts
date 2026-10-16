@@ -1,0 +1,119 @@
+--- a/cmake/gmxManageNvccConfig.cmake
++++ b/cmake/gmxManageNvccConfig.cmake
+@@ -244,7 +244,8 @@
+ list(APPEND GMX_CUDA_NVCC_FLAGS "${GMX_CUDA_NVCC_GENCODE_FLAGS}")
+ gmx_add_nvcc_flag_if_supported(GMX_CUDA_NVCC_FLAGS NVCC_HAS_USE_FAST_MATH -use_fast_math)
+ # Add warnings
+-gmx_add_nvcc_flag_if_supported(GMX_CUDA_NVCC_FLAGS NVCC_HAS_PTXAS_WARN_DOUBLE_USAGE -Xptxas -warn-double-usage)
++# -warn-double-usage removed: nbnxm energy accumulators are double on purpose
++# (scripts/installation/patch_gmx2023.5_gpu_energy_double.py)
+ gmx_add_nvcc_flag_if_supported(GMX_CUDA_NVCC_FLAGS NVCC_HAS_PTXAS_WERROR -Xptxas -Werror)
+ 
+ # assemble the CUDA host compiler flags
+--- a/src/gromacs/nbnxm/gpu_types_common.h
++++ b/src/gromacs/nbnxm/gpu_types_common.h
+@@ -80,10 +80,10 @@
+  */
+ struct NBStagingData
+ {
+-    //! LJ energy
+-    float* eLJ = nullptr;
+-    //! electrostatic energy
+-    float* eElec = nullptr;
++    //! LJ energy (double: see patch_gmx2023.5_gpu_energy_double.py)
++    double* eLJ = nullptr;
++    //! electrostatic energy (double)
++    double* eElec = nullptr;
+     //! shift forces
+     Float3* fShift = nullptr;
+ };
+@@ -105,10 +105,10 @@
+     //! force output array, size \ref numAtoms
+     DeviceBuffer<Float3> f;
+ 
+-    //! LJ energy output, size 1
+-    DeviceBuffer<float> eLJ;
+-    //! Electrostatics energy input, size 1
+-    DeviceBuffer<float> eElec;
++    //! LJ energy output, size 1 (double: see patch_gmx2023.5_gpu_energy_double.py)
++    DeviceBuffer<double> eLJ;
++    //! Electrostatics energy input, size 1 (double)
++    DeviceBuffer<double> eElec;
+ 
+     //! shift forces
+     DeviceBuffer<Float3> fShift;
+--- a/src/gromacs/nbnxm/nbnxm_gpu_data_mgmt.cpp
++++ b/src/gromacs/nbnxm/nbnxm_gpu_data_mgmt.cpp
+@@ -890,7 +890,7 @@
+         /* DtoH energies */
+         if (stepWork.computeEnergy)
+         {
+-            static_assert(sizeof(*nb->nbst.eLJ) == sizeof(float),
++            static_assert(sizeof(*nb->nbst.eLJ) == sizeof(double),
+                           "Sizes of host- and device-side LJ energy terms should be the same.");
+             copyFromDeviceBuffer(nb->nbst.eLJ,
+                                  &adat->eLJ,
+@@ -899,7 +899,7 @@
+                                  deviceStream,
+                                  GpuApiCallBehavior::Async,
+                                  bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+-            static_assert(sizeof(*nb->nbst.eElec) == sizeof(float),
++            static_assert(sizeof(*nb->nbst.eElec) == sizeof(double),
+                           "Sizes of host- and device-side electrostatic energy terms should be the "
+                           "same.");
+             copyFromDeviceBuffer(nb->nbst.eElec,
+--- a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
+@@ -203,8 +203,8 @@
+ #        else
+     float                reactionFieldShift = nbparam.c_rf;
+ #        endif /* EL_EWALD_ANY */
+-    float*                     e_lj        = atdat.eLJ;
+-    float*                     e_el        = atdat.eElec;
++    double*                    e_lj        = atdat.eLJ;
++    double*                    e_el        = atdat.eElec;
+ #    endif     /* CALC_ENERGIES */
+ 
+     /* thread/block/warp id-s */
+--- a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh
+@@ -631,7 +631,7 @@
+  *  array sizes.
+  */
+ static __forceinline__ __device__ void
+-reduce_energy_pow2(volatile float* buf, float* e_lj, float* e_el, unsigned int tidx)
++reduce_energy_pow2(volatile float* buf, double* e_lj, double* e_el, unsigned int tidx)
+ {
+     float e1, e2;
+ 
+@@ -657,8 +657,8 @@
+         e1 = buf[tidx] + buf[tidx + i];
+         e2 = buf[c_fbufStride + tidx] + buf[c_fbufStride + tidx + i];
+ 
+-        atomicAdd(e_lj, e1);
+-        atomicAdd(e_el, e2);
++        atomicAdd(e_lj, static_cast<double>(e1));
++        atomicAdd(e_el, static_cast<double>(e2));
+     }
+ }
+ 
+@@ -666,7 +666,7 @@
+  *  array sizes.
+  */
+ static __forceinline__ __device__ void
+-reduce_energy_warp_shfl(float E_lj, float E_el, float* e_lj, float* e_el, int tidx, const unsigned int activemask)
++reduce_energy_warp_shfl(float E_lj, float E_el, double* e_lj, double* e_el, int tidx, const unsigned int activemask)
+ {
+     int i, sh;
+ 
+@@ -682,8 +682,8 @@
+     /* The first thread in the warp writes the reduced energies */
+     if (tidx == 0 || tidx == warp_size)
+     {
+-        atomicAdd(e_lj, E_lj);
+-        atomicAdd(e_el, E_el);
++        atomicAdd(e_lj, static_cast<double>(E_lj));
++        atomicAdd(e_el, static_cast<double>(E_el));
+     }
+ }
+ 

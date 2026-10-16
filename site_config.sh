@@ -35,6 +35,10 @@ export GMXLIB="$HOME/opt/gromacs/ff${GMXLIB:+:$GMXLIB}"
 # Add one entry per installed port; the value is the directory name minus ".ff".
 declare -A FF_ALIASES=(
   [charmm36m]="charmm36-feb2026_cgenff-5.0"
+  # a99SB-disp (Robustelli 2018) from github.com/paulrobustelli/Force-Fields, pinned at
+  # commit 25e729d — upstream has no release name, so the commit is the name. Pair with
+  # WATER=a99SBdisp_water. Validated for REST2: docs/FORCE_FIELDS.md.
+  [a99sb-disp]="a99SBdisp-25e729d"
 )
 
 # resolve_ff <name> — echo the real force-field directory name for <name>.

@@ -249,6 +249,32 @@ addition to* each build's bundled `top/`, so AMBER keeps working. Keep
 `WATER=tip3p`: inside a CHARMM FF dir that resolves to the CHARMM-modified TIP3P
 automatically. Never cross a force field with another one's water.
 
+### Step 7b — Install a99SB-disp (optional)
+
+a99SB-disp (Robustelli, Piana & Shaw, PNAS 2018) is distributed on GitHub, not as a dated
+release, so pin a commit and use it as the name. The validated one is `25e729d`:
+
+```bash
+git clone https://github.com/paulrobustelli/Force-Fields.git /tmp/ff-repo
+git -C /tmp/ff-repo checkout 25e729d
+cp -r /tmp/ff-repo/Gromacs_FFs/a99SBdisp.ff ~/opt/gromacs/ff/a99SBdisp-25e729d.ff
+sha256sum ~/opt/gromacs/ff/a99SBdisp-25e729d.ff/*   # keep for the record
+```
+
+`site_config.sh` already maps `[a99sb-disp]="a99SBdisp-25e729d"`. Use it with its own
+water, which is not a `pdb2gmx` built-in name — the REST2 engine handles that (and the
+4-site solvent box) automatically:
+
+```bash
+FF="a99sb-disp"
+WATER="a99SBdisp_water"
+```
+
+No local patches are needed at this commit (HIP builds fine despite upstream issue #25).
+Installing a **different commit** means re-running the validation in
+[`../../docs/FORCE_FIELDS.md`](../../docs/FORCE_FIELDS.md) ("Validation record:
+a99SB-disp") — the port has had real parameter fixes over its history.
+
 ## Step 8 — Configure `site_config.sh`
 
 Edit the repo-root `site_config.sh`. Every value is `${VAR:-default}`, so an
