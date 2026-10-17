@@ -518,8 +518,8 @@ pilot's `processed.top`/`topol_rep*.top` rebuild identically).
 
 ### GROMACS: an input PDB with `CYX` residue names gets NO disulfide bonds from `pdb2gmx`
 
-`pdb2gmx` finds disulfides with `specbond.dat` (`CYS SG 1 CYS SG 1 0.2 CYX CYX`): it matches
-residues **named `CYS`** whose SG atoms are within 0.2 nm, links them, and renames them `CYX`.
+`pdb2gmx` finds disulfides with `specbond.dat` (`CYS SG 1 CYS SG 1 0.2 CYS2 CYS2`): it matches
+residues **named `CYS`** whose SG atoms are within 0.2 nm, links them, and renames them `CYS2`.
 A residue that is already called `CYX` in the input — as tleap writes it, and as many
 Amber-prepared PDBs have it — does not match, so the bond is silently not made: no
 "Linking CYS-… and CYS-…" line in the log, the SG atoms carry the `CYX` template (no HG) but are
@@ -532,67 +532,34 @@ disulfide. The engine's inputs so far (e.g. `gp130_218-Y_binder_only.pdb`) use `
 
 ---
 
-### Validating a GROMACS AMBER-family port against tleap: tleap is not automatically the ground truth
+### PLUMED/REST2: on GPU, hrex exchange energies carry a small random noise — identical replicas accept <100%
 
-When a GROMACS port and an Amber build of "the same" force field disagree, find the term
-before blaming the port. Two things seen validating a99SB-disp (`docs/FORCE_FIELDS.md`,
-validation record):
+Two replicas with **identical** Hamiltonians (both λ = 1.000000) must exchange with probability
+exactly 1. On GPU they do not: GROMACS reduces per-warp energies into single-precision
+accumulators in a non-deterministic order, so the same configuration evaluates to a slightly
+different energy each time, and hrex compares energies from separate evaluations (the PLUMED
+`dplumed` term; GROMACS zeroes its own `dE_term` under hrex). CPU evaluation is bit-exact.
 
-- **tleap added a generic torsion on top of a specific one.** For serine `OG-CB-CA-C` the
-  frcmod has both the specific `C-CT-C8-OH` (1-fold) and the wildcard `X-CT-C8-X` (3-fold).
-  Amber and viparr rules say the exact match replaces the wildcard; tleap nevertheless emitted
-  both terms for 8 of the 9 serines in gp130 (the ninth, and the serine in a test peptide,
-  got only the specific term — same atom types, so the trigger is not the typing), up to
-  1.3 kJ/mol each.
-  The GROMACS port and the Desmond definition have the specific term only. Judge against the
-  force field's definitive source (here the authors' Desmond files), not against whichever
-  implementation you happen to trust.
-- **Stock GROMACS `amber99sb-ildn` has a constant torsion offset vs tleap `ff99SBildn`**
-  (−74.64 kJ/mol on a 23-residue peptide, identical in every frame). A constant changes no
-  force and cancels in the exchange criterion; it is a representation difference, not a bug.
-  Look at the *spread* of a difference across frames, not its mean.
+**Measured** (identical-λ probe, 50 attempts; full data, job IDs and the 2×2 decomposition in
+`knowledgebase/rest2_gpu_exchange_noise.md`):
 
-Compare per torsion as a *function of φ*, not term by term: Amber stores some a99SB-disp
-torsions with arbitrary phases (e.g. 50.05°) while the GROMACS port expands them into 0°/90°
-cosine/sine terms plus a constant — equal functions, different parameter lists.
+- Real production system (amber99sb-ildn/tip3p, 20,959 atoms, GPU): `dplumed` **σ = 0.18 kT**,
+  identical-λ acceptance 0.96; detailed-balance bias ≈ σ²/2 ≈ **0.017 kT**.
+- a99SB-disp (4-site TIP4P-D water amplifies PME noise): σ ≈ 0.42 kT, acceptance 0.81.
 
----
+**PME reciprocal-space is the dominant source, not the nonbonded kernel.** A controlled 2×2
+(`-pme gpu` vs `-pme cpu`, stock vs an energy-double build) shows moving PME to CPU drops σ from
+0.42 → 0.074 kT, whereas doubling the short-range `nbnxm` energy accumulator only drops it
+0.42 → 0.31 kT. (An energy-double GROMACS patch was evaluated and removed — it fixes only the
+minor short-range source at full GPU speed, no practical gain.)
 
-### PLUMED/REST2: on GPU, hrex exchange energies carry ~0.37 kT of random noise — identical replicas accept only ~80%
-
-Two replicas with **identical** Hamiltonians (`TEMPS_LIST="300,300"`, both λ = 1.000000) must
-exchange with probability exactly 1: the REST2 criterion is a difference of energies of the
-same configurations under the same topology. On the engine's GPU path (`-nb gpu -pme gpu
--bonded gpu`) they accepted **84%** (a99SB-disp) and **80%** (amber99sb-ildn/TIP3P) of swaps
-over 50 attempts. The exchange block in `rest2.log` shows where it comes from:
-
-```
-Repl 0 <-> 1  dE_term = -0.000e+00 (kT)     GROMACS' own term: exactly 0
-  dpV = -0.000e+00  d =  0.000e+00           pressure-volume term: exactly 0
-dplumed =  3.007e-01  dE_Term =  3.007e-01 (kT)   PLUMED's re-evaluated energies: NOT 0
-Repl pr   .74
-```
-
-`dplumed` over 50 attempts: mean 0.009 kT (zero within error), **sd 0.36–0.38 kT** for both
-force fields. Rerunning the **same tprs on CPU** (`-nb cpu -pme cpu -bonded cpu`): `dplumed`
-exactly 0 on every attempt, P = 1.0 on 25/25. With `-nb gpu -pme cpu` the noise stays (sd
-0.39 kT), so it is the **GPU nonbonded kernel**: its energy accumulation order is
-non-deterministic, so the same configuration evaluates to a slightly different energy each
-time (~3 ppm of a −1.2×10⁵ kT total), and hrex compares energies from separate evaluations.
-(`-nb cpu -pme gpu` is not a valid combination.) The original REST2 validation
-(`knowledgebase/plans/REST2-pipeline.md`) was CPU-only, which is why P = 1.0 was seen there.
-
-**What it means:** every exchange on a real ladder is decided with ~0.37 kT of zero-mean random
-error added to Δ. That lowers acceptance a little and — because noise enters the Metropolis
-test non-linearly — slightly violates detailed balance (order σ²/2 ≈ 0.07 kT in the exchange
-weights). It is **not force-field-specific** and applies to **every GPU REST2 run so far**,
-including the amber99sb-ildn pilot. The STEP 11 gate does not see it (it only requires a
-nonzero rate).
-
-**Options** (decision pending, 2026-09-28): accept and quote it as a known small bias; or run
-REST2 fully on CPU (exact; measured 97 ns/day per replica at 8 cores/replica on gp130 in
-a99SB-disp water vs 162 ns/day/replica for the 24-replica, 1-GPU GPU pilot). **Diagnose it on
-any new setup with an identical-λ run and read the `dplumed` lines, not just the acceptance.**
+**It does not meaningfully bias the science — accept it.** Forces are exact, so each λ samples
+the correct ensemble; the noise is zero-mean; the detailed-balance bias (~0.017 kT for
+amber/tip3p) is far below statistical and force-field error; and the real 100 ns run mixed
+thoroughly (119–184 round trips/walker, acceptance 0.38–0.42). For exactness (high-precision
+free energy, very fine ladder) run `-pme cpu` (bit-exact, ~3× slower). Guard against the real
+failure mode — a *broken* hrex build giving zero exchanges — with the STEP 11 acceptance gate,
+not against this noise.
 
 ---
 

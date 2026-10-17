@@ -399,8 +399,11 @@ STEP 7's `check_rest2_topology.py` passed; no LINCS/SETTLE warnings; λ=1 replic
 300.0 K. System density 1025 kg/m³ (vs 1013 with TIP3P, which is known to be under-dense);
 **pure `a99SBdisp_water`: 995.1 ± 0.7 kg/m³ at 300 K, 1 bar** (experiment 996.5).
 
-**Identical-λ exchange check** (2 replicas, both λ=1): acceptance 84% on GPU, not 100%.
-This is GPU energy noise in PLUMED's hrex re-evaluation (`dplumed` sd 0.36 kT), identical
-for amber99sb-ildn (80%) and absent on CPU (exactly 1.0) — see `knowledgebase/GOTCHAS.md`,
-"on GPU, hrex exchange energies carry ~0.37 kT of random noise". It is not specific to
-a99SB-disp and applies to every GPU REST2 run.
+**Identical-λ exchange check** (2 replicas, both λ=1): acceptance 84% (a99SB-disp) / 80%
+(amber99sb-ildn) on GPU, not 100% — GPU energy noise in PLUMED's hrex re-evaluation
+(`dplumed` sd ~0.36 kT), exact on CPU. It is not specific to a99SB-disp and applies to every
+GPU REST2 run. The dominant source is **PME reciprocal-space** (not the nonbonded kernel);
+forces are exact, so each λ-ensemble is unbiased and the detailed-balance bias is ~0.017 kT
+(amber/tip3p) — negligible for structural observables. Accept it, or run `-pme cpu` for
+exactness (~3× slower). Full decomposition and decision:
+`knowledgebase/rest2_gpu_exchange_noise.md`.
